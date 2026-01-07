@@ -1,6 +1,10 @@
-# Unified Memory System: Semantic + Episodic
+# 🧠 Unified Memory System: Semantic + Episodic
 
-AI-powered memory system combining **semantic memory** (long-term facts) and **episodic memory** (time-based conversations) using PostgreSQL 17, pgvector, and Groq LLM.
+Complete AI memory system with **unified input/output** combining:
+- **Semantic Memory** (long-term facts, knowledge, skills, persona)
+- **Episodic Memory** (time-based events, conversations, experiences)
+
+Built with PostgreSQL 17, pgvector, and Groq LLM.
 
 ## 🧠 Memory Architecture
 
@@ -101,19 +105,22 @@ cp .env.example .env
 # DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, GROQ_API_KEY
 ```
 
-### 4. Run Unified Application
+### 4. Run Unified System
 ```bash
-python3 unified_memory_app.py
+# New unified interface (recommended)
+python3 unified_memory_system.py
+
+# Individual components
+python3 enhanced_memory_app.py    # Semantic only
+python3 unified_memory_app.py     # Full system with chat
 ```
 
-**Available Commands:**
-- `<text>` - Auto-classify and store in semantic memory
-- `chat <message>` - Chat with AI (uses full context)
-- `search <query>` - Search semantic knowledge
-- `episodes` - View conversation episodes
-- `persona` - View user profile
-- `context [query]` - View complete memory context
+**Commands (unified_memory_system.py):**
+- `<text>` - Store memory (auto-routed to semantic/episodic)
+- `search <query>` - Search both memory types
+- `context [query]` - Get complete user context
 - `user <id>` - Switch user
+- `quit` - Exit
 
 ## Database Schema
 
@@ -151,78 +158,139 @@ python3 unified_memory_app.py
 - Long-term episode storage
 - Historical reference
 
-## Usage Example
+## Usage Examples
+
+### Unified Interface (Recommended)
 
 ```python
+from unified_memory_system import UnifiedMemorySystem
+
+# Initialize system
+memory = UnifiedMemorySystem(user_id="alice")
+
+# AUTOMATIC MEMORY ROUTING
+# Input is automatically classified and stored in semantic/episodic
+
+# Example 1: Semantic + Episodic
+result = memory.store_memory("Today I learned Python decorators at the workshop")
+# → Stored in:
+#    - Episodic: event (time-bound experience)
+#    - Semantic: knowledge (general fact about decorators)
+
+# Example 2: Pure Semantic
+result = memory.store_memory("I'm a software engineer who loves Python")
+# → Stored in: Semantic - user_persona
+
+# Example 3: Pure Episodic
+result = memory.store_memory("Had coffee with Sarah at 3pm, discussed the new API")
+# → Stored in: Episodic - interaction
+
+# UNIFIED SEARCH
+# Searches both semantic and episodic memories
+results = memory.search_memory("What did I learn about Python?")
+for result in results:
+    print(f"[{result['memory_type']}] {result['content']}")
+    print(f"Relevance: {result['score']:.2%}")
+    print(f"Time: {result['timestamp']}\n")
+
+# GET COMPLETE CONTEXT
+# Retrieves semantic facts + episodic experiences
+context = memory.get_context("Tell me about my Python knowledge")
+print(f"Semantic memories: {len(context['semantic_memories'])}")
+print(f"Episodic memories: {len(context['episodic_memories'])}")
+```
+
+### Separate Components
+
+```python
+# SEMANTIC ONLY
+from enhanced_memory_app import EnhancedMemoryApp
+
+app = EnhancedMemoryApp()
+app.classify_and_store("Python uses dynamic typing")
+results = app.search_all("What can I do with Python?")
+
+# EPISODIC ONLY (with chat)
 from unified_memory_app import UnifiedMemorySystem
 
 app = UnifiedMemorySystem()
-
-# 1. SEMANTIC MEMORY - Store different types of information
-# Auto-classified into appropriate layers
-
-app.classify_and_store("I'm Alice, a Python developer who loves AI")
-# → Classified as: user_persona
-
-app.classify_and_store("Python uses dynamic typing")
-# → Classified as: knowledge
-
-app.classify_and_store("I can build REST APIs with FastAPI")
-# → Classified as: skill
-
-app.classify_and_store("To deploy: git push, then run docker build")
-# → Classified as: process
-
-
-# 2. EPISODIC MEMORY - Chat conversations (auto-stored)
-
-response = app.chat("What programming languages do I know?")
-# → AI uses full context (persona + knowledge + past conversations)
-print(response)
-
-
-# 3. UNIFIED SEARCH
-
-# Search semantic memory
-results = app.search_semantic("Python", limit=5)
-for r in results:
-    print(f"[{r['category']}] {r['content']} (score: {r['similarity']:.2%})")
-
-# Search episodic memory (past conversations)
-episodes = app.search_episodes("deployment", limit=3)
-for ep in episodes:
-    print(f"Episode: {ep['message_count']} messages from {ep['date_from']}")
-
-
-# 4. FULL CONTEXT RETRIEVAL
-
-context = app.get_full_context("What can I do?")
-# Returns:
-# {
-#   "persona": {...},
-#   "recent_chat": [...],
-#   "semantic_memory": [...],
-#   "episodic_memory": [...]
-# }
+app.add_message("Had a great meeting today about the AI project")
+episodes = app.get_recent_episodes(limit=5)
 ```
+
+## Key Features
+
+### 🎯 Unified Input/Output
+- **Single interface** for all memory operations
+- **Automatic classification** - input routed to semantic/episodic/both
+- **Combined search** - results from all memory types ranked by relevance
+
+### 🧠 Memory Types
+
+| Type | Storage | Use Case | Example |
+|------|---------|----------|---------|
+| **Semantic** | Timeless facts | "Python is object-oriented" | Knowledge base |
+| **Episodic** | Time-bound events | "Met Sarah at 3pm about API" | Life logging |
+| **Hybrid** | Both | "Today I learned Python decorators" | Learning experiences |
+
+### 🔍 Search Features
+- **Vector similarity** (cosine distance on embeddings)
+- **Full-text search** (PostgreSQL ts_vector)
+- **Temporal filtering** (date ranges for episodes)
+- **Score fusion** (weighted combination of multiple signals)
+- **Context-aware** (personalized to user)
 
 ## API Reference
 
-### Semantic Memory
-- `classify_and_store(text)` - Auto-classify and store
-- `store_persona(data)` - Manual persona update
-- `store_knowledge(content, category, tags)` - Manual storage
-- `search_semantic(query, limit)` - Search knowledge base
-- `get_user_persona()` - Get user profile
+### UnifiedMemorySystem
 
-### Episodic Memory
-- `chat(message)` - Chat with AI (auto-stores in episodic)
-- `add_chat_message(role, content)` - Manual message storage
-- `get_recent_chat_history(limit)` - Get recent messages
-- `search_episodes(query, limit)` - Search past conversations
+**Storage**
+- `store_memory(text, context=None)` → Auto-routes to semantic/episodic
+- `classify_memory_type(text)` → Returns classification info
 
-### Unified Context
-- `get_full_context(query)` - Get complete memory snapshot
+**Search**
+- `search_memory(query, limit=10, memory_type=None)` → Unified search
+- `get_context(query=None)` → Complete user profile + relevant memories
+
+**Utility**
+- `user_id` - Current user identifier
+- `close()` - Close database connection
+
+## Architecture
+
+### Data Flow
+
+```
+User Input
+    ↓
+[Classification Layer]
+    ├─ Semantic? (timeless fact)
+    ├─ Episodic? (time-bound event)
+    └─ Both? (learning experience)
+    ↓
+[Storage Layer]
+    ├─ Semantic DB (user_persona, knowledge_base)
+    └─ Episodic DB (episodes, super_chat)
+    ↓
+[Embedding Layer]
+    └─ Groq API (nomic-embed-text-v1.5)
+    ↓
+[Vector Index]
+    └─ pgvector (IVFFlat cosine similarity)
+
+Search Query
+    ↓
+[Query Embedding]
+    ↓
+[Parallel Search]
+    ├─ Semantic: Vector + Text
+    └─ Episodic: Vector + Temporal
+    ↓
+[Score Fusion & Ranking]
+    ↓
+[Unified Results]
+```
+
 ## Tech Stack
 
 - **Database**: PostgreSQL 17 with pgvector extension
