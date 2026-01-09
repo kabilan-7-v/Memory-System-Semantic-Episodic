@@ -1,5 +1,6 @@
 """
 Semantic Memory Service - High-level service for semantic memory operations
+with Redis caching for improved performance
 """
 from typing import List, Optional, Dict, Any
 from src.models.semantic_memory import UserPersona, KnowledgeItem, SearchResult
@@ -7,6 +8,17 @@ from src.repositories.user_persona_repository import UserPersonaRepository
 from src.repositories.knowledge_repository import KnowledgeRepository
 from src.services.embedding_service import EmbeddingService
 from src.config.database import db_config
+
+# Import Redis cache (optional - graceful fallback if unavailable)
+try:
+    from src.services.redis_semantic_cache import (
+        cache_persona, get_cached_persona, invalidate_persona_cache,
+        cache_knowledge_search, search_knowledge_cache, invalidate_knowledge_cache
+    )
+    REDIS_CACHE_AVAILABLE = True
+except Exception as e:
+    print(f"⚠️  Redis semantic cache unavailable: {e}")
+    REDIS_CACHE_AVAILABLE = False
 
 
 class SemanticMemoryService:
@@ -62,18 +74,37 @@ class SemanticMemoryService:
  return self.persona_repo.create(persona)
  
  def get_user_persona(self, user_id: str) -> Optional[UserPersona]:
- """Get user persona by user_id"""
- return self.persona_repo.get_by_user_id(user_id)
+ """Get user persona by user_id with Redis caching"""
+ # Try Redis cache first
+ if REDIS_CACHE_AVAILABLE:
+ cached = get_cached_persona(user_id)
+ if cached:
+ return UserPersona.from_dict(cached)
  
- def update_user_persona(
- self,
- user_id: str,
- **updates
- ) -> Optional[UserPersona]:
- """Update specific fields of a user persona"""
+ # Cache miss - fetch from database
+ persona = self.persona_repo.get_by_user_id( and invalidate cache"""
  persona = self.persona_repo.get_by_user_id(user_id)
  if not persona:
  return None
+ 
+ # Update fields
+ for key, value in updates.items():
+ if hasattr(persona, key):
+ setattr(persona, key, value)
+ 
+ # Regenerate embedding if content changed
+ if any(k in updates for k in ['name', 'interests', 'expertise_areas', 'communication_style']):
+ persona.embedding = self.embedding_service.embed_user_persona(
+ persona.to_dict()
+ )
+ 
+ updated = self.persona_repo.update(persona)
+ 
+ # Invalidate cache
+ if updated and REDIS_CACHE_AVAILABLE:
+ invalidate_persona_cache(user_id)
+ 
+ return updated
  
  # Update fields
  for key, value in updates.items():
@@ -178,13 +209,7 @@ class SemanticMemoryService:
  query: str,
  user_id: Optional[str] = None,
  limit: int = 10,
- min_similarity: float = 0.7,
- category: Optional[str] = None,
- tags: Optional[List[str]] = None,
- search_type: str = 'semantic' # 'semantic' or 'text'
- ) -> List[SearchResult]:
- """
- Search knowledge base using semantic or text search
+ min_similarity: float = 0.7, with Redis caching
  
  Args:
  query: Search query text
@@ -195,9 +220,17 @@ class SemanticMemoryService:
  tags: Filter by tags
  search_type: 'semantic' for vector search or 'text' for keyword search
  """
+ # Try Redis cache for semantic searches
+ if search_type == 'semantic' and user_id and REDIS_CACHE_AVAILABLE:
+ cached_results = search_knowledge_cache(user_id, query, k=limit)
+ if cached_results:
+ # Convert cached dicts to SearchResult objects
+ return [SearchResult.from_dict(r) if isinstance(r, dict) else r for r in cached_results]
+ 
+ # Cache miss - perform database search
  if search_type == 'semantic':
  query_embedding = self.embedding_service.embed_text(query)
- return self.knowledge_repo.search_by_vector(
+ results = self.knowledge_repo.search_by_vector(
  embedding=query_embedding,
  user_id=user_id,
  limit=limit,
@@ -206,6 +239,20 @@ class SemanticMemoryService:
  tags=tags
  )
  else:
+ items = self.knowledge_repo.search_by_text(
+ query=query,
+ user_id=user_id,
+ limit=limit
+ )
+ results = [SearchResult(item=item, similarity_score=1.0) for item in items]
+ 
+ # Cache results for future searches
+ if user_id and results and REDIS_CACHE_AVAILABLE:
+ # Convert to serializable format
+ cache_data = [r.to_dict() if hasattr(r, 'to_dict') else r for r in results]
+ cache_knowledge_search(user_id, query, cache_data)
+ 
+ return results
  items = self.knowledge_repo.search_by_text(
  query=query,
  user_id=user_id,
