@@ -94,7 +94,7 @@ def demo():
                 print(f"   Content: {result['content'][:80]}...")
                 print(f"   🎯 RRF Score: {result['rrf_score']:.4f} ({result['combined_percentage']}%)")
                 print(f"      ├─ Vector Similarity: {result['vector_percentage']}%")
-                print(f"      └─ Keyword Match:     {result['keyword_percentage']}%")
+                print(f"      └─ BM25 Match:        {result['bm25_percentage']}%")
             
             print(f"\n📊 Metrics:")
             metrics = results['metrics']
