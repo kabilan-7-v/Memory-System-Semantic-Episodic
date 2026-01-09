@@ -1,28 +1,37 @@
 # 🧠 Interactive Memory System
 
-A dual-layer semantic + episodic memory system with **Redis-like temporary cache** and intelligent AI-powered Q&A capabilities.
+A dual-layer semantic + episodic memory system with **Redis cache** and intelligent AI-powered Q&A capabilities.
 
 ## 🚀 Quick Start
 
 ```bash
-# 1. Install dependencies
+# 1. Install Redis (if not already installed)
+brew install redis  # macOS
+# or: sudo apt-get install redis-server  # Linux
+
+# 2. Start Redis
+brew services start redis  # macOS
+# or: sudo systemctl start redis  # Linux
+
+# 3. Install Python dependencies
 pip install -r requirements.txt
 
-# 2. Set up environment
+# 4. Set up environment
 cp .env.example .env
 # Edit .env with your PostgreSQL and Groq API credentials
 
-# 3. Run the application
+# 5. Run the application
 python3 interactive_memory_app.py
 ```
 
 ## 📋 Features
 
-✅ **Temporary Memory Cache (NEW!)**
-- **Redis-like in-memory cache** for last 15 chats
+✅ **Redis Temporary Cache**
+- **Actual Redis server** for last 15 chats per user
 - **4-8x faster** response times for recent messages
-- Automatic management and user switching support
-- See [TEMPORARY_MEMORY_CACHE.md](docs/TEMPORARY_MEMORY_CACHE.md) for details
+- Persistent across application restarts
+- 24-hour TTL with automatic refresh
+- See [REDIS_INTEGRATION.md](docs/REDIS_INTEGRATION.md) for details
 
 ✅ **Dual-Layer Memory Architecture**
 - **Semantic Layer**: Long-term facts (user personas, knowledge base)
