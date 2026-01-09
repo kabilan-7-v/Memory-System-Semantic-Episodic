@@ -293,6 +293,64 @@ def test_redis_namespace_structure():
     return True
 
 
+def test_hybrid_search_redis_cache():
+    """Test 6: Hybrid Search on Redis Cache"""
+    print("\n" + "="*70)
+    print("TEST 6: Hybrid Search on Redis Cached Data")
+    print("="*70)
+    
+    search = UnifiedHybridSearch()
+    
+    if not search.redis_client:
+        print("❌ Redis not available")
+        return False
+    
+    # First, ensure we have cached data
+    print("\n1️⃣ Ensuring cached data exists...")
+    test_user_context_caching()
+    test_user_input_caching()
+    
+    # Now perform hybrid search on Redis cache
+    print("\n2️⃣ Performing hybrid search on Redis cache...")
+    
+    test_queries = [
+        ("machine learning", "all"),
+        ("Python", "inputs"),
+        ("neural networks", "context")
+    ]
+    
+    for query, search_type in test_queries:
+        print(f"\n🔍 Query: '{query}' (type: {search_type})")
+        
+        results = search.hybrid_search_redis_cache(
+            query=query,
+            user_id="alice_test",
+            search_type=search_type,
+            limit=5
+        )
+        
+        if results['results']:
+            print(f"   ✅ Found {len(results['results'])} results")
+            
+            for i, result in enumerate(results['results'][:3], 1):
+                print(f"\n   #{i} Type: {result['type']}")
+                print(f"      Content: {result['content'][:60]}...")
+                print(f"      RRF Score: {result['rrf_score']:.4f}")
+                print(f"      ├─ Vector:  {result['vector_percentage']}%")
+                print(f"      └─ Keyword: {result['keyword_percentage']}%")
+            
+            # Show metrics
+            metrics = results['metrics']
+            print(f"\n   📊 Search Metrics:")
+            print(f"      Search Time: {metrics['search_time_ms']}ms")
+            print(f"      Candidates: Vector={metrics['vector_candidates']}, Keyword={metrics['keyword_candidates']}")
+            print(f"      Source: {metrics['source']}")
+        else:
+            print(f"   ⚠️  No results found")
+    
+    return True
+
+
 def main():
     """Run all tests"""
     print("\n" + "🚀"*35)
@@ -304,7 +362,8 @@ def main():
         ("User Input Caching", test_user_input_caching),
         ("RRF Algorithm", test_rrf_algorithm),
         ("Search Metrics", test_search_metrics),
-        ("Redis Namespace Structure", test_redis_namespace_structure)
+        ("Redis Namespace Structure", test_redis_namespace_structure),
+        ("Hybrid Search on Redis Cache", test_hybrid_search_redis_cache)
     ]
     
     results = []
@@ -343,6 +402,7 @@ def main():
         print("   ✓ Search percentage metrics (Vector %, BM25 %)")
         print("   ✓ Redis-based caching for both semantic and episodic")
         print("   ✓ Hybrid search with ranking scores")
+        print("   ✓ Hybrid search directly on Redis cached data")
     else:
         print("⚠️  Some tests failed. Check output above.")
     

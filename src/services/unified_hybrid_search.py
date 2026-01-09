@@ -210,6 +210,205 @@ class UnifiedHybridSearch:
             print(f"❌ Failed to cache user input: {e}")
             return False
     
+    # ========== Hybrid Search on Redis Cache ==========
+    
+    def hybrid_search_redis_cache(
+        self,
+        query: str,
+        user_id: str,
+        search_type: str = "all",  # all, context, inputs
+        limit: int = 10
+    ) -> Dict[str, Any]:
+        """
+        Hybrid search directly on Redis cached data
+        Combines vector similarity + keyword matching on cached items
+        
+        Args:
+            query: Search query
+            user_id: User ID
+            search_type: 'all', 'context' (user_context), or 'inputs' (user_input)
+            limit: Max results
+        
+        Returns:
+            Results with RRF scores and percentages
+        """
+        if not self.redis_client:
+            return {"results": [], "metrics": {"error": "Redis unavailable"}}
+        
+        start_time = time.time()
+        
+        # Generate query embedding
+        query_embedding = self.embedding_service.embed_text(query)
+        if isinstance(query_embedding, list):
+            query_vec = np.array(query_embedding)
+        elif isinstance(query_embedding, np.ndarray):
+            query_vec = query_embedding
+        else:
+            query_vec = np.array(list(query_embedding))
+        
+        # Collect candidates from Redis
+        vector_results = []  # (key, similarity_score)
+        keyword_results = []  # (key, keyword_score)
+        
+        # Search user context
+        if search_type in ["all", "context"]:
+            context_key = f"user_context:{user_id}"
+            if self.redis_client.exists(context_key):
+                data = self.redis_client.hgetall(context_key)
+                
+                # Convert bytes to strings if needed
+                data_str = {}
+                for k, v in data.items():
+                    key_str = k.decode() if isinstance(k, bytes) else k
+                    val_str = v.decode() if isinstance(v, bytes) else v
+                    data_str[key_str] = val_str
+                
+                # Vector similarity
+                if 'embedding' in data_str:
+                    try:
+                        cached_emb = np.array(json.loads(data_str['embedding']))
+                        similarity = self._cosine_similarity(query_vec, cached_emb)
+                        vector_results.append((context_key, float(similarity)))
+                    except:
+                        pass
+                
+                # Keyword matching
+                if 'unified_text' in data_str:
+                    keyword_score = self._simple_keyword_match(query, data_str['unified_text'])
+                    keyword_results.append((context_key, keyword_score))
+        
+        # Search user inputs
+        if search_type in ["all", "inputs"]:
+            input_keys = self.redis_client.keys(f"user_input:{user_id}:*")
+            for key in input_keys:
+                key_str = key.decode() if isinstance(key, bytes) else key
+                data = self.redis_client.hgetall(key_str)
+                
+                # Convert bytes to strings
+                data_str = {}
+                for k, v in data.items():
+                    k_str = k.decode() if isinstance(k, bytes) else k
+                    v_str = v.decode() if isinstance(v, bytes) else v
+                    data_str[k_str] = v_str
+                
+                # Vector similarity
+                if 'embedding' in data_str:
+                    try:
+                        cached_emb = np.array(json.loads(data_str['embedding']))
+                        similarity = self._cosine_similarity(query_vec, cached_emb)
+                        vector_results.append((key_str, float(similarity)))
+                    except:
+                        pass
+                
+                # Keyword matching
+                if 'query' in data_str:
+                    keyword_score = self._simple_keyword_match(query, data_str['query'])
+                    keyword_results.append((key_str, keyword_score))
+        
+        # Sort by scores
+        vector_results.sort(key=lambda x: x[1], reverse=True)
+        keyword_results.sort(key=lambda x: x[1], reverse=True)
+        
+        # Apply RRF
+        rrf_results = self.reciprocal_rank_fusion(vector_results, keyword_results)
+        
+        # Build final results
+        final_results = []
+        for key, rrf_score in rrf_results[:limit]:
+            # Ensure key is string
+            if isinstance(key, bytes):
+                key = key.decode()
+            
+            # Fetch data from Redis
+            data = self.redis_client.hgetall(key)
+            if not data:
+                continue
+            
+            # Convert bytes to strings
+            data_str = {}
+            for k, v in data.items():
+                k_str = k.decode() if isinstance(k, bytes) else k
+                v_str = v.decode() if isinstance(v, bytes) else v
+                data_str[k_str] = v_str
+            
+            # Get original scores
+            vector_score = next((s for k, s in vector_results if k == key), 0.0)
+            keyword_score = next((s for k, s in keyword_results if k == key), 0.0)
+            
+            # Determine content
+            if key.startswith('user_context:'):
+                content = data_str.get('unified_text', '')[:200]
+                if len(data_str.get('unified_text', '')) > 200:
+                    content += "..."
+                item_type = "context"
+            else:
+                content = data_str.get('query', '')
+                item_type = "input"
+            
+            final_results.append({
+                "key": key,
+                "type": item_type,
+                "content": content,
+                "rrf_score": round(rrf_score, 4),
+                "vector_score": round(vector_score, 4),
+                "keyword_score": round(keyword_score, 4),
+                "vector_percentage": round(vector_score * 100, 2),
+                "keyword_percentage": round(keyword_score * 100, 2),
+                "combined_percentage": round(rrf_score * 100, 2),
+                "created_at": data_str.get('created_at', data_str.get('cached_at', 'unknown'))
+            })
+        
+        search_time = time.time() - start_time
+        
+        return {
+            "results": final_results,
+            "metrics": {
+                "total_results": len(final_results),
+                "vector_candidates": len(vector_results),
+                "keyword_candidates": len(keyword_results),
+                "search_type": search_type,
+                "search_time_ms": round(search_time * 1000, 2),
+                "source": "redis_cache"
+            }
+        }
+    
+    def _cosine_similarity(self, vec1: np.ndarray, vec2: np.ndarray) -> float:
+        """Calculate cosine similarity between two vectors"""
+        try:
+            if len(vec1) != len(vec2):
+                return 0.0
+            dot_product = np.dot(vec1, vec2)
+            norm1 = np.linalg.norm(vec1)
+            norm2 = np.linalg.norm(vec2)
+            if norm1 == 0 or norm2 == 0:
+                return 0.0
+            return dot_product / (norm1 * norm2)
+        except:
+            return 0.0
+    
+    def _simple_keyword_match(self, query: str, text: str) -> float:
+        """Simple keyword matching score (BM25-like)"""
+        try:
+            query_lower = query.lower()
+            text_lower = text.lower()
+            
+            # Split into words
+            query_words = set(query_lower.split())
+            text_words = text_lower.split()
+            
+            if not query_words or not text_words:
+                return 0.0
+            
+            # Count matches
+            matches = sum(1 for word in query_words if word in text_words)
+            
+            # Normalize by query length
+            score = matches / len(query_words)
+            
+            return score
+        except:
+            return 0.0
+    
     # ========== RRF (Reciprocal Rank Fusion) Algorithm ==========
     
     def rrf_score(self, rank: int) -> float:
