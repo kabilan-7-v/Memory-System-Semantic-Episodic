@@ -23,19 +23,16 @@ cp .env.example .env
 # 5. Set up database with metadata support
 psql -U postgres -d semantic_memory < database/add_metadata_support.sql
 
-# 6. Run the application with optimization (recommended)
-python3 interactive_memory_app.py --optimization balanced
-
-# Or run without optimization
-python3 interactive_memory_app.py --no-optimization
+# 6. Run the application (context optimization enabled by default)
+python3 interactive_memory_app.py
 ```
 
 ## 📋 Features
 
 ✅ **Context Optimization System (NEW!)**
-- **30-70% token reduction**: Minimize LLM costs and context window usage
+- **30-50% token reduction**: Minimize LLM costs and context window usage
 - **5-stage pipeline**: Deduplication → Entropy filtering → Compression → Re-ranking → Token limiting
-- **4 optimization profiles**: Conservative, Balanced, Aggressive, Quality
+- **Balanced profile**: Optimal efficiency and quality for most use cases
 - **Intelligent filtering**: Removes duplicates, low-information content, irrelevant contexts
 - **Re-ranking with iteration**: Verifies quality with threshold-based refinement
 - **Real-time statistics**: Track token savings and optimization metrics
@@ -190,21 +187,11 @@ The system includes intelligent context optimization to reduce memory usage, tok
 ### Usage
 
 ```bash
-# Balanced optimization (default) - 30-50% token reduction
-python3 interactive_memory_app.py --optimization balanced
-
-# Aggressive optimization - 50-70% token reduction  
-python3 interactive_memory_app.py --optimization aggressive
-
-# Quality optimization - 20-35% reduction, max quality
-python3 interactive_memory_app.py --optimization quality
-
-# Conservative - 10-20% reduction, minimal filtering
-python3 interactive_memory_app.py --optimization conservative
-
-# Disable optimization
-python3 interactive_memory_app.py --no-optimization
+# Simply run the application - optimization is enabled by default
+python3 interactive_memory_app.py
 ```
+
+Context optimization runs automatically with the **Balanced profile** for optimal efficiency and quality.
 
 ### What Gets Optimized
 
@@ -224,13 +211,12 @@ python3 interactive_memory_app.py --no-optimization
 - Iterates if quality drops below threshold
 - Enforces token limits
 
-### Cost Savings Example
+### Performance
 
-| Profile | Token Reduction | Monthly Cost (10K requests) |
-|---------|----------------|----------------------------|
-| No optimization | 0% | $1,500 |
-| Balanced | 50% | $750 💰 Save $750 |
-| Aggressive | 70% | $450 💰 Save $1,050 |
+- **Token Reduction**: 30-50% (balanced profile)
+- **Cost Savings**: $750/month for typical workloads (10K requests)
+- **Speed Impact**: Minimal (~20-50ms overhead)
+- **Quality**: Maintained through intelligent re-ranking
 
 **📚 Learn More:**
 - [Complete Guide](docs/CONTEXT_OPTIMIZATION_GUIDE.md)
