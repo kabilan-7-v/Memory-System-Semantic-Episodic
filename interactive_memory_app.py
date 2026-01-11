@@ -44,18 +44,16 @@ class InteractiveMemorySystem:
         self.current_chat_id = None
         # Redis connection for temporary memory cache
         self.redis_client = None
-        # Context optimization
-        self.enable_optimization = enable_optimization
-        self.optimization_profile = optimization_profile
+        # Context optimization - always enabled with balanced profile
+        self.enable_optimization = True
+        self.optimization_profile = "balanced"
         
-        # Initialize optimizers with profile
-        if self.enable_optimization:
-            opt_config = get_optimization_profile(optimization_profile)
-            self.context_optimizer = ContextOptimizer(**opt_config)
-            self.summarization_optimizer = SummarizationOptimizer(
-                compression_ratio=opt_config.get('compression_ratio', 0.3)
-            )
-            print(f"🎯 Context Optimization: {optimization_profile.upper()} profile")
+        # Initialize optimizers with balanced profile
+        opt_config = get_optimization_profile("balanced")
+        self.context_optimizer = ContextOptimizer(**opt_config)
+        self.summarization_optimizer = SummarizationOptimizer(
+            compression_ratio=opt_config.get('compression_ratio', 0.3)
+        )
         
         self.connect_db()
         self.connect_redis()
@@ -1248,46 +1246,10 @@ MEMORY CONTEXT:
 
 
 if __name__ == "__main__":
-    import argparse
+    print(f"\n🚀 Starting Interactive Memory System")
+    print(f"   Context Optimization: ENABLED (Balanced Profile)")
+    print(f"   • 30-50% token reduction for efficiency and quality")
+    print()
     
-    parser = argparse.ArgumentParser(description="Interactive Memory System with Context Optimization")
-    parser.add_argument(
-        "--optimization",
-        choices=["conservative", "balanced", "aggressive", "quality", "off"],
-        default="balanced",
-        help="Context optimization profile (default: balanced)"
-    )
-    parser.add_argument(
-        "--no-optimization",
-        action="store_true",
-        help="Disable context optimization completely"
-    )
-    
-    args = parser.parse_args()
-    
-    # Determine if optimization is enabled
-    enable_opt = not args.no_optimization and args.optimization != "off"
-    opt_profile = args.optimization if args.optimization != "off" else "balanced"
-    
-    # Display configuration
-    if enable_opt:
-        print(f"\n🚀 Starting Interactive Memory System")
-        print(f"   Optimization: {opt_profile.upper()}")
-        print(f"   Profile Details:")
-        if opt_profile == "conservative":
-            print(f"   • Minimal optimization, preserves most content")
-        elif opt_profile == "balanced":
-            print(f"   • Balanced optimization for efficiency and quality")
-        elif opt_profile == "aggressive":
-            print(f"   • Maximum optimization, focuses on token reduction")
-        elif opt_profile == "quality":
-            print(f"   • Prioritizes quality over token savings")
-        print()
-    else:
-        print(f"\n🚀 Starting Interactive Memory System (Optimization Disabled)\n")
-    
-    app = InteractiveMemorySystem(
-        optimization_profile=opt_profile,
-        enable_optimization=enable_opt
-    )
+    app = InteractiveMemorySystem()
     app.run()
