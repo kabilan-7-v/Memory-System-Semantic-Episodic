@@ -1,7 +1,7 @@
 from datetime import datetime
-from embeddings import EmbeddingModel
-from bm25_index import BM25Index
-from db import get_conn
+from .embeddings import EmbeddingModel
+from .bm25_index import BM25Index
+from .db import get_conn
 
 embedder = EmbeddingModel()
 

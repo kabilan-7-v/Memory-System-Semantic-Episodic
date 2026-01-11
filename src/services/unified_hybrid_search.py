@@ -2,13 +2,25 @@
 Unified Hybrid Search with RRF (Reciprocal Rank Fusion)
 Combines Vector Search + BM25 + Redis Cache for both Semantic and Episodic memory
 Stores unified user context (persona + knowledge + process) in single Redis index
+
+NOW WITH METADATA FILTERING:
+- Filter results by category, tags, time windows, importance, etc.
+- Support complex filter combinations (AND/OR/NOT)
+- Pre-filter for performance optimization
 """
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple, Union
 import json
 import time
 from datetime import datetime
 from collections import defaultdict
 import numpy as np
+from src.services.metadata_filter import (
+    MetadataFilterEngine, 
+    MetadataFilter, 
+    FilterGroup,
+    FilterBuilder,
+    FilterOperator
+)
 
 # Import dependencies
 REDIS_AVAILABLE = False
@@ -59,6 +71,7 @@ class UnifiedHybridSearch:
         self.bm25_weight = bm25_weight
         self.k_rrf = k_rrf  # RRF parameter
         self.redis_client = get_redis() if REDIS_AVAILABLE else None
+        self.filter_engine = MetadataFilterEngine()  # Metadata filtering engine
         
     # ========== Redis Unified User Context ==========
     
@@ -772,3 +785,336 @@ class UnifiedHybridSearch:
             return results if results else None
         except:
             return None
+    
+    # ========== METADATA FILTERING METHODS ==========
+    
+    def hybrid_search_with_filters(
+        self,
+        query: str,
+        user_id: str,
+        filters: Optional[Union[MetadataFilter, FilterGroup]] = None,
+        search_semantic: bool = True,
+        search_episodic: bool = True,
+        limit: int = 10
+    ) -> Dict[str, Any]:
+        """
+        Hybrid search with metadata filtering
+        
+        Args:
+            query: Search query
+            user_id: User ID
+            filters: Metadata filters (single filter or filter group)
+            search_semantic: Include semantic layer
+            search_episodic: Include episodic layer
+            limit: Max results per layer
+            
+        Returns:
+            Filtered and ranked results with RRF scores
+            
+        Example:
+            # Filter by category and importance
+            filter_group = FilterBuilder.create()
+            filter_group.add_filter(FilterBuilder.equals("category", "knowledge"))
+            filter_group.add_filter(FilterBuilder.greater_than("importance_score", 0.7))
+            
+            results = search.hybrid_search_with_filters(
+                query="python tips",
+                user_id="user_001",
+                filters=filter_group
+            )
+        """
+        start_time = time.time()
+        results = {"semantic": [], "episodic": [], "combined": [], "metrics": {}}
+        
+        # Generate query embedding
+        query_embedding = self.embedding_service.embed_text(query)
+        if isinstance(query_embedding, list):
+            query_vec = np.array(query_embedding)
+        else:
+            query_vec = query_embedding
+        
+        # Search semantic layer with filters
+        if search_semantic:
+            semantic_results = self._search_semantic_with_filters(
+                query, query_vec, user_id, filters, limit
+            )
+            results["semantic"] = semantic_results
+        
+        # Search episodic layer with filters
+        if search_episodic:
+            episodic_results = self._search_episodic_with_filters(
+                query, query_vec, user_id, filters, limit
+            )
+            results["episodic"] = episodic_results
+        
+        # Combine with RRF
+        combined = self._rrf_combine(results["semantic"], results["episodic"])
+        results["combined"] = combined[:limit]
+        
+        # Add metrics
+        elapsed = time.time() - start_time
+        results["metrics"] = {
+            "search_time_ms": round(elapsed * 1000, 2),
+            "semantic_count": len(results["semantic"]),
+            "episodic_count": len(results["episodic"]),
+            "combined_count": len(results["combined"]),
+            "filters_applied": filters is not None
+        }
+        
+        return results
+    
+    def _search_semantic_with_filters(
+        self,
+        query: str,
+        query_embedding: np.ndarray,
+        user_id: str,
+        filters: Optional[Union[MetadataFilter, FilterGroup]],
+        limit: int
+    ) -> List[Dict[str, Any]]:
+        """Search semantic layer with metadata filters"""
+        try:
+            # Build SQL with filters
+            base_query = """
+                SELECT 
+                    k.*,
+                    1 - (k.embedding <=> %s::vector) as vector_score,
+                    ts_rank_cd(k.ts_vector, plainto_tsquery('english', %s), 32) as bm25_score
+                FROM knowledge_base k
+                WHERE k.user_id = %s
+            """
+            
+            params = [query_embedding.tolist(), query, user_id]
+            
+            # Add filter conditions
+            if filters:
+                where_clause, filter_params = self.filter_engine.to_sql_where(filters)
+                base_query += f" AND ({where_clause})"
+                params.extend(filter_params.values())
+            
+            base_query += """
+                ORDER BY (
+                    %s * (1 - (k.embedding <=> %s::vector)) +
+                    %s * ts_rank_cd(k.ts_vector, plainto_tsquery('english', %s), 32)
+                ) DESC
+                LIMIT %s
+            """
+            
+            params.extend([
+                self.vector_weight, query_embedding.tolist(),
+                self.bm25_weight, query,
+                limit
+            ])
+            
+            with db_config.get_cursor() as cursor:
+                cursor.execute(base_query, params)
+                results = []
+                for row in cursor.fetchall():
+                    row_dict = dict(row)
+                    row_dict['layer'] = 'semantic'
+                    row_dict['hybrid_score'] = (
+                        self.vector_weight * float(row['vector_score']) +
+                        self.bm25_weight * float(row['bm25_score'])
+                    )
+                    results.append(row_dict)
+                
+                return results
+                
+        except Exception as e:
+            print(f"❌ Semantic search with filters error: {e}")
+            return []
+    
+    def _search_episodic_with_filters(
+        self,
+        query: str,
+        query_embedding: np.ndarray,
+        user_id: str,
+        filters: Optional[Union[MetadataFilter, FilterGroup]],
+        limit: int
+    ) -> List[Dict[str, Any]]:
+        """Search episodic layer with metadata filters"""
+        try:
+            base_query = """
+                SELECT 
+                    e.*,
+                    1 - (e.vector <=> %s::vector) as vector_score
+                FROM episodes e
+                WHERE e.user_id = %s AND e.vector IS NOT NULL
+            """
+            
+            params = [query_embedding.tolist(), user_id]
+            
+            # Add filter conditions
+            if filters:
+                where_clause, filter_params = self.filter_engine.to_sql_where(filters)
+                base_query += f" AND ({where_clause})"
+                params.extend(filter_params.values())
+            
+            base_query += """
+                ORDER BY e.vector <=> %s::vector
+                LIMIT %s
+            """
+            
+            params.extend([query_embedding.tolist(), limit])
+            
+            with db_config.get_cursor() as cursor:
+                cursor.execute(base_query, params)
+                results = []
+                for row in cursor.fetchall():
+                    row_dict = dict(row)
+                    row_dict['layer'] = 'episodic'
+                    row_dict['hybrid_score'] = float(row['vector_score'])
+                    results.append(row_dict)
+                
+                return results
+                
+        except Exception as e:
+            print(f"❌ Episodic search with filters error: {e}")
+            return []
+    
+    def search_by_time_window(
+        self,
+        query: str,
+        user_id: str,
+        hours: int = 24,
+        limit: int = 10
+    ) -> Dict[str, Any]:
+        """
+        Search within a time window (last N hours)
+        Useful for: "what did we discuss today?" or "recent updates"
+        """
+        time_filter = FilterBuilder.time_window("created_at", hours=hours)
+        return self.hybrid_search_with_filters(
+            query=query,
+            user_id=user_id,
+            filters=time_filter,
+            limit=limit
+        )
+    
+    def search_by_category(
+        self,
+        query: str,
+        user_id: str,
+        category: str,
+        min_importance: float = 0.0,
+        limit: int = 10
+    ) -> Dict[str, Any]:
+        """
+        Search within specific category with optional importance threshold
+        Categories: knowledge, skill, process, fact, preference
+        """
+        filter_group = FilterBuilder.create()
+        filter_group.add_filter(FilterBuilder.equals("category", category))
+        if min_importance > 0:
+            filter_group.add_filter(
+                FilterBuilder.greater_than("importance_score", min_importance)
+            )
+        
+        return self.hybrid_search_with_filters(
+            query=query,
+            user_id=user_id,
+            filters=filter_group,
+            search_semantic=True,
+            search_episodic=False,  # Episodes don't have categories
+            limit=limit
+        )
+    
+    def search_by_tags(
+        self,
+        query: str,
+        user_id: str,
+        tags: List[str],
+        match_all: bool = False,
+        limit: int = 10
+    ) -> Dict[str, Any]:
+        """
+        Search items with specific tags
+        
+        Args:
+            match_all: If True, item must have ALL tags; if False, ANY tag
+        """
+        if match_all:
+            tag_filter = MetadataFilter("tags", FilterOperator.ALL_OF, tags)
+        else:
+            tag_filter = MetadataFilter("tags", FilterOperator.ANY_OF, tags)
+        
+        return self.hybrid_search_with_filters(
+            query=query,
+            user_id=user_id,
+            filters=tag_filter,
+            limit=limit
+        )
+    
+    def search_important_items(
+        self,
+        query: str,
+        user_id: str,
+        min_importance: float = 0.7,
+        recent_days: Optional[int] = None,
+        limit: int = 10
+    ) -> Dict[str, Any]:
+        """
+        Search high-importance items, optionally within recent timeframe
+        """
+        filter_group = FilterBuilder.create()
+        filter_group.add_filter(
+            FilterBuilder.greater_than_or_equal("importance_score", min_importance)
+        )
+        
+        if recent_days:
+            filter_group.add_filter(FilterBuilder.recent("created_at", days=recent_days))
+        
+        return self.hybrid_search_with_filters(
+            query=query,
+            user_id=user_id,
+            filters=filter_group,
+            limit=limit
+        )
+    
+    def search_with_metadata(
+        self,
+        query: str,
+        user_id: str,
+        metadata_conditions: Dict[str, Any],
+        limit: int = 10
+    ) -> Dict[str, Any]:
+        """
+        Search with custom metadata field conditions
+        
+        Example:
+            metadata_conditions = {
+                "metadata.department": "engineering",
+                "metadata.verified": True,
+                "metadata.priority": {"operator": "gte", "value": 5}
+            }
+        """
+        filter_group = FilterBuilder.create()
+        
+        for field, condition in metadata_conditions.items():
+            if isinstance(condition, dict):
+                # Complex condition with operator
+                op_str = condition.get("operator", "eq")
+                value = condition.get("value")
+                
+                if op_str == "eq":
+                    filter_group.add_filter(FilterBuilder.equals(field, value))
+                elif op_str == "gt":
+                    filter_group.add_filter(FilterBuilder.greater_than(field, value))
+                elif op_str == "gte":
+                    filter_group.add_filter(
+                        MetadataFilter(field, FilterOperator.GREATER_THAN_OR_EQUAL, value)
+                    )
+                elif op_str == "lt":
+                    filter_group.add_filter(FilterBuilder.less_than(field, value))
+                elif op_str == "contains":
+                    filter_group.add_filter(FilterBuilder.contains(field, value))
+            else:
+                # Simple equality
+                filter_group.add_filter(FilterBuilder.equals(field, condition))
+        
+        return self.hybrid_search_with_filters(
+            query=query,
+            user_id=user_id,
+            filters=filter_group,
+            limit=limit
+        )
+

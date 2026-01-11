@@ -38,16 +38,15 @@ class HybridSearchService:
         total = bm25_weight + vector_weight
         self.bm25_weight = bm25_weight / total
         self.vector_weight = vector_weight / total
-    
-    def hybrid_search(
-        self,
-        query: str,
-        user_id: Optional[str] = None,
-        limit: int = 10,
-        min_score: float = 0.0,
-        category: Optional[str] = None,
-        tags: Optional[List[str]] = None
-    ) -> List[Dict[str, Any]]:
+ def hybrid_search(
+ self,
+ query: str,
+ user_id: Optional[str] = None,
+ limit: int = 10,
+ min_score: float = 0.0,
+ category: Optional[str] = None,
+ tags: Optional[List[str]] = None
+ ) -> List[Dict[str, Any]]:
         """
         Perform hybrid search combining BM25 and vector search
         
@@ -72,15 +71,14 @@ class HybridSearchService:
         # Filter by minimum score and limit
         filtered = [r for r in combined if r['hybrid_score'] >= min_score]
         return sorted(filtered, key=lambda x: x['hybrid_score'], reverse=True)[:limit]
-    
-    def _bm25_search(
-        self,
-        query: str,
-        user_id: Optional[str] = None,
-        limit: int = 20,
-        category: Optional[str] = None,
-        tags: Optional[List[str]] = None
-    ) -> List[Dict[str, Any]]:
+ def _bm25_search(
+ self,
+ query: str,
+ user_id: Optional[str] = None,
+ limit: int = 20,
+ category: Optional[str] = None,
+ tags: Optional[List[str]] = None
+ ) -> List[Dict[str, Any]]:
         """
         BM25-style full-text search using PostgreSQL ts_rank_cd
         
@@ -139,15 +137,14 @@ class HybridSearchService:
             results = cursor.fetchall()
             
             return [dict(row) for row in results]
-    
-    def _vector_search(
-        self,
-        query: str,
-        user_id: Optional[str] = None,
-        limit: int = 20,
-        category: Optional[str] = None,
-        tags: Optional[List[str]] = None
-    ) -> List[Dict[str, Any]]:
+ def _vector_search(
+ self,
+ query: str,
+ user_id: Optional[str] = None,
+ limit: int = 20,
+ category: Optional[str] = None,
+ tags: Optional[List[str]] = None
+ ) -> List[Dict[str, Any]]:
         """
         Vector similarity search using HNSW index
         
@@ -204,12 +201,11 @@ class HybridSearchService:
             results = cursor.fetchall()
             
             return [dict(row) for row in results]
-    
-    def _combine_results(
-        self,
-        bm25_results: List[Dict[str, Any]],
-        vector_results: List[Dict[str, Any]]
-    ) -> List[Dict[str, Any]]:
+ def _combine_results(
+ self,
+ bm25_results: List[Dict[str, Any]],
+ vector_results: List[Dict[str, Any]]
+ ) -> List[Dict[str, Any]]:
         """
         Combine BM25 and vector search results using weighted scoring
         
@@ -239,42 +235,41 @@ class HybridSearchService:
                 'vector_rank': None,
                 'vector_rrf': 0.0
             }
-        
-        # Add/merge vector results
-        for rank, result in enumerate(vector_results, 1):
-            doc_id = str(result['id'])
-            vector_rrf = 1.0 / (rank + 60)
-            
-            if doc_id in merged:
-                merged[doc_id]['vector_score'] = float(result['vector_score'])
-                merged[doc_id]['vector_rank'] = rank
-                merged[doc_id]['vector_rrf'] = vector_rrf
-            else:
-                merged[doc_id] = {
-                    **result,
-                    'bm25_score': 0.0,
-                    'normalized_bm25': 0.0,
-                    'bm25_rank': None,
-                    'bm25_rrf': 0.0,
-                    'vector_rank': rank,
-                    'vector_rrf': vector_rrf
-                }
-        
-        # Calculate hybrid scores
-        for doc in merged.values():
-            # Weighted combination of normalized scores
-            weighted_score = (
-                self.bm25_weight * doc['normalized_bm25'] +
-                self.vector_weight * doc['vector_score']
-            )
-            
-            # RRF combination
-            rrf_score = doc['bm25_rrf'] + doc['vector_rrf']
-            
-            # Final hybrid score combines both
-            doc['hybrid_score'] = 0.7 * weighted_score + 0.3 * rrf_score
-        
-        return list(merged.values())
+ # Add/merge vector results
+ for rank, result in enumerate(vector_results, 1):
+ doc_id = str(result['id'])
+ vector_rrf = 1.0 / (rank + 60)
+ 
+ if doc_id in merged:
+ merged[doc_id]['vector_score'] = float(result['vector_score'])
+ merged[doc_id]['vector_rank'] = rank
+ merged[doc_id]['vector_rrf'] = vector_rrf
+ else:
+ merged[doc_id] = {
+ **result,
+ 'bm25_score': 0.0,
+ 'normalized_bm25': 0.0,
+ 'bm25_rank': None,
+ 'bm25_rrf': 0.0,
+ 'vector_rank': rank,
+ 'vector_rrf': vector_rrf
+ }
+ 
+ # Calculate hybrid scores
+ for doc in merged.values():
+ # Weighted combination of normalized scores
+ weighted_score = (
+ self.bm25_weight * doc['normalized_bm25'] +
+ self.vector_weight * doc['vector_score']
+ )
+ 
+ # RRF combination
+ rrf_score = doc['bm25_rrf'] + doc['vector_rrf']
+ 
+ # Final hybrid score combines both
+ doc['hybrid_score'] = 0.7 * weighted_score + 0.3 * rrf_score
+ 
+ return list(merged.values())
     
     def search_knowledge(
         self,

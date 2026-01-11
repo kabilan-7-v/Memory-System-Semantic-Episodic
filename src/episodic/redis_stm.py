@@ -1,8 +1,8 @@
 # redis_stm.py
 import time
 import numpy as np
-from embeddings import EmbeddingModel
-from redis_client import get_redis
+from .embeddings import EmbeddingModel
+from .redis_client import get_redis
 
 embedder = EmbeddingModel()
 r = get_redis()

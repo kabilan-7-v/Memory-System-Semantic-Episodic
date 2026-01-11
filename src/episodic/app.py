@@ -1,7 +1,7 @@
 from flask import Flask, request, jsonify
-from chat_service import add_super_chat_message
-from context_builder import build_context
-from llm import call_llm
+from .chat_service import add_super_chat_message
+from .context_builder import build_context
+from .llm import call_llm
 
 app = Flask(__name__)
 

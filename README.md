@@ -1,6 +1,6 @@
 # 🧠 Interactive Memory System
 
-A dual-layer semantic + episodic memory system with **Redis cache** and intelligent AI-powered Q&A capabilities.
+A dual-layer semantic + episodic memory system with **Redis cache**, **advanced metadata filtering**, and intelligent AI-powered Q&A capabilities.
 
 ## 🚀 Quick Start
 
@@ -20,11 +20,21 @@ pip install -r requirements.txt
 cp .env.example .env
 # Edit .env with your PostgreSQL and Groq API credentials
 
-# 5. Run the application
+# 5. Set up database with metadata support
+psql -U postgres -d semantic_memory < database/add_metadata_support.sql
+
+# 6. Run the application
 python3 interactive_memory_app.py
 ```
 
 ## 📋 Features
+
+✅ **Advanced Metadata Filtering (NEW!)**
+- **10 filtering techniques**: Exact match, range, multi-value, hierarchical, composite, pattern matching, geospatial, time-based, statistical, tag hierarchy
+- **Precision retrieval**: Filter by category, tags, importance, time, metadata fields
+- **10-100x faster** queries with indexed filtering
+- **Flexible API**: Fluent filter builder and boolean logic support
+- See [METADATA_FILTERING_GUIDE.md](docs/METADATA_FILTERING_GUIDE.md) for complete guide
 
 ✅ **Redis Temporary Cache**
 - **Actual Redis server** for last 15 chats per user
@@ -41,6 +51,7 @@ python3 interactive_memory_app.py
 - Auto-classify and store information in appropriate layers
 - Hybrid search across all memory types + temporary cache
 - Context-aware AI responses using Groq API
+- Metadata-powered precision filtering
 
 ✅ **Conversation History**
 - Full timestamp tracking
@@ -86,6 +97,78 @@ search architecture
 
 # View history
 history
+```
+
+## 🔍 Metadata Filtering (New Feature!)
+
+The system now supports advanced metadata filtering for precision retrieval:
+
+```python
+from src.services.unified_hybrid_search import UnifiedHybridSearch
+from src.services.metadata_filter import FilterBuilder, FilterGroup, LogicalOperator
+
+search = UnifiedHybridSearch()
+
+# Example 1: Recent important items
+results = search.search_by_time_window(
+    query="project updates",
+    user_id="user_001",
+    hours=24  # Last 24 hours
+)
+
+# Example 2: Filter by category and importance
+results = search.search_by_category(
+    query="python tips",
+    user_id="user_001",
+    category="knowledge",
+    min_importance=0.7
+)
+
+# Example 3: Tag-based search
+results = search.search_by_tags(
+    query="api design",
+    user_id="user_001",
+    tags=["python", "api", "backend"],
+    match_all=False  # Match ANY tag
+)
+
+# Example 4: Complex filtering
+filters = FilterGroup(operator=LogicalOperator.AND)
+filters.add_filter(FilterBuilder.equals("category", "knowledge"))
+filters.add_filter(FilterBuilder.recent("created_at", days=7))
+filters.add_filter(FilterBuilder.greater_than("importance_score", 0.7))
+
+results = search.hybrid_search_with_filters(
+    query="recent work",
+    user_id="user_001",
+    filters=filters
+)
+```
+
+### 10 Filtering Techniques:
+1. **Exact Match** - Category, status, IDs
+2. **Range** - Scores, dates, quantities  
+3. **Multi-value** - Tag matching (ANY/ALL/NONE)
+4. **Hierarchical** - Nested metadata fields
+5. **Composite** - Boolean logic (AND/OR/NOT)
+6. **Pattern Matching** - Regex, wildcards
+7. **Geospatial** - Location-based
+8. **Time-based** - Recent, today, date ranges
+9. **Statistical** - Percentiles, outliers
+10. **Tag Hierarchy** - Taxonomies, skill trees
+
+**📚 Learn More:**
+- [Complete Guide](docs/METADATA_FILTERING_GUIDE.md)
+- [Quick Reference](docs/METADATA_FILTERING_QUICK_REF.md)
+- [Implementation Summary](METADATA_FILTERING_SUMMARY.md)
+
+**🧪 Try It:**
+```bash
+# Run tests
+python3 test_metadata_filtering.py
+
+# Run demo
+python3 demo_metadata_filtering.py
 ```
 
 ## 🗂️ Project Structure

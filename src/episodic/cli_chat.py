@@ -1,7 +1,7 @@
 import uuid
-from chat_service import add_super_chat_message
-from context_builder import build_context
-from llm import call_llm
+from .chat_service import add_super_chat_message
+from .context_builder import build_context
+from .llm import call_llm
 
 USER_ID = "11111111-1111-1111-1111-111111111111"
 

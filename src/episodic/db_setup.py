@@ -1,5 +1,5 @@
-from db import get_conn
-from embeddings import EmbeddingModel
+from .db import get_conn
+from .embeddings import EmbeddingModel
 
 embedder = EmbeddingModel()
 

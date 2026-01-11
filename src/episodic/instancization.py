@@ -1,5 +1,5 @@
 import json
-from db import get_conn
+from .db import get_conn
 
 def instancize_old_episodes():
     with get_conn() as conn, conn.cursor() as cur:

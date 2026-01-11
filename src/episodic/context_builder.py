@@ -1,6 +1,6 @@
 # context_builder.py
-from hybrid_retriever import HybridRetriever
-from redis_stm import search_stm, store_stm
+from .hybrid_retriever import HybridRetriever
+from .redis_stm import search_stm, store_stm
 
 
 def build_context(user_id, user_input, deepdive_id=None):

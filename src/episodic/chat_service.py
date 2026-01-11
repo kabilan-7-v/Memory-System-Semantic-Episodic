@@ -1,4 +1,4 @@
-from db import get_conn
+from .db import get_conn
 def get_or_create_super_chat(user_id):
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("SELECT id FROM super_chat WHERE user_id=%s", (user_id,))
