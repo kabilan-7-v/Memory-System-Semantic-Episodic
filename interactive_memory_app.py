@@ -50,9 +50,13 @@ class InteractiveMemorySystem:
         
         # Initialize optimizers with balanced profile
         opt_config = get_optimization_profile("balanced")
+        
+        # Remove compression_ratio from optimizer config (it's for summarizer only)
+        summarization_ratio = opt_config.pop('compression_ratio', 0.3)
+        
         self.context_optimizer = ContextOptimizer(**opt_config)
         self.summarization_optimizer = SummarizationOptimizer(
-            compression_ratio=opt_config.get('compression_ratio', 0.3)
+            compression_ratio=summarization_ratio
         )
         
         self.connect_db()
