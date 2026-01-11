@@ -434,13 +434,28 @@ class InteractiveMemorySystem:
         """Hybrid search across all memory layers including Redis temporary memory"""
         cur = self.conn.cursor()
         
-        print(f"\n🔍 Searching with HYBRID approach + Redis cache across all layers...")
+        print(f"\n{'='*70}")
+        print(f"🔍 HYBRID SEARCH PROCESS - FULL OBSERVABILITY")
+        print(f"{'='*70}")
+        print(f"Query: '{query}'")
+        print(f"User ID: {self.user_id}")
+        print(f"Limit per layer: {limit}")
+        print(f"{'='*70}\n")
         
         # 1. Search REDIS TEMPORARY MEMORY FIRST (fastest, most recent)
+        print("⚡ STEP 1/5: Searching TEMPORARY MEMORY (Redis Cache)...")
+        print(f"   ├─ Storage: Redis Unified Cloud")
+        print(f"   ├─ Key: temp_memory:{self.user_id}:messages")
+        print(f"   └─ Strategy: Keyword matching (case-insensitive)\n")
+        
         temp_results = []
         query_lower = query.lower()
         
         if self.redis_client:
+            cache_key = self.get_redis_key("messages")
+            messages = self.redis_client.lrange(cache_key, 0, -1)
+            print(f"   ✓ Retrieved {len(messages)} messages from Redis cache")
+            
             temp_messages = self.get_temp_memory()
             for msg in temp_messages:
                 if query_lower in msg['content'].lower():
@@ -451,9 +466,17 @@ class InteractiveMemorySystem:
                         'content': msg['content'],
                         'created_at': msg['created_at']
                     })
+            print(f"   ✓ Matched {len(temp_results)} results in temp memory\n")
+        else:
+            print(f"   ⚠️  Redis not available - skipping temp memory\n")
         
         
-        # 1. Search Semantic Memory - Knowledge Base (text search)
+        # 2. Search Semantic Memory - Knowledge Base (text search)
+        print("📚 STEP 2/5: Searching SEMANTIC MEMORY → knowledge_base...")
+        print(f"   ├─ Table: knowledge_base")
+        print(f"   ├─ Strategy: ILIKE text search on content")
+        print(f"   ├─ Filter: user_id = {self.user_id}")
+        print(f"   └─ Query Pattern: %{query}%\n")
         cur.execute("""
             SELECT 
                 'SEMANTIC-KNOWLEDGE' as source_layer,
@@ -470,8 +493,14 @@ class InteractiveMemorySystem:
         """, (self.user_id, f'%{query}%', limit))
         
         semantic_knowledge = cur.fetchall()
+        print(f"   ✓ Found {len(semantic_knowledge)} results in knowledge_base\n")
         
-        # 2. Search Semantic Memory - User Persona (text search)
+        # 3. Search Semantic Memory - User Persona (text search)
+        print("📚 STEP 3/5: Searching SEMANTIC MEMORY → user_persona...")
+        print(f"   ├─ Table: user_persona")
+        print(f"   ├─ Strategy: Fetch all persona data for user")
+        print(f"   ├─ Filter: user_id = {self.user_id}")
+        print(f"   └─ Fields: name, interests, expertise_areas\n")
         cur.execute("""
             SELECT 
                 'SEMANTIC-PERSONA' as source_layer,
@@ -485,8 +514,15 @@ class InteractiveMemorySystem:
         """, (self.user_id,))
         
         semantic_persona = cur.fetchall()
+        print(f"   ✓ Found {len(semantic_persona)} persona record(s)\n")
         
-        # 3. Search Episodic Memory - Recent Messages (text search)
+        # 4. Search Episodic Memory - Recent Messages (text search)
+        print("📅 STEP 4/5: Searching EPISODIC MEMORY → super_chat_messages...")
+        print(f"   ├─ Table: super_chat_messages (JOIN super_chat)")
+        print(f"   ├─ Strategy: ILIKE text search on content")
+        print(f"   ├─ Filter: user_id = {self.user_id}")
+        print(f"   ├─ Query Pattern: %{query}%")
+        print(f"   └─ Order: created_at DESC\n")
         cur.execute("""
             SELECT 
                 'EPISODIC-MESSAGES' as source_layer,
@@ -504,8 +540,15 @@ class InteractiveMemorySystem:
         """, (self.user_id, f'%{query}%', limit))
         
         episodic_messages = cur.fetchall()
+        print(f"   ✓ Found {len(episodic_messages)} message(s) in episodic memory\n")
         
-        # 4. Search Episodic Memory - Episodes (text search in messages JSON)
+        # 5. Search Episodic Memory - Episodes (text search in messages JSON)
+        print("📅 STEP 5/5: Searching EPISODIC MEMORY → episodes...")
+        print(f"   ├─ Table: episodes")
+        print(f"   ├─ Strategy: ILIKE text search on messages JSON")
+        print(f"   ├─ Filter: user_id = {self.user_id}")
+        print(f"   ├─ Query Pattern: %{query}% (in messages::text)")
+        print(f"   └─ Order: created_at DESC\n")
         cur.execute("""
             SELECT 
                 'EPISODIC-EPISODES' as source_layer,
@@ -523,8 +566,19 @@ class InteractiveMemorySystem:
         """, (self.user_id, f'%{query}%', limit))
         
         episodic_episodes = cur.fetchall()
+        print(f"   ✓ Found {len(episodic_episodes)} episode(s)\n")
         
         cur.close()
+        
+        total_results = len(temp_results) + len(semantic_knowledge) + len(semantic_persona) + len(episodic_messages) + len(episodic_episodes)
+        print(f"{'='*70}")
+        print(f"✅ SEARCH COMPLETE: {total_results} total results across all layers")
+        print(f"   ├─ Temp Memory: {len(temp_results)}")
+        print(f"   ├─ Semantic Knowledge: {len(semantic_knowledge)}")
+        print(f"   ├─ Semantic Persona: {len(semantic_persona)}")
+        print(f"   ├─ Episodic Messages: {len(episodic_messages)}")
+        print(f"   └─ Episodic Episodes: {len(episodic_episodes)}")
+        print(f"{'='*70}\n")
         
         return {
             "temp_memory": temp_results,  # Most recent, fastest access
@@ -535,57 +589,94 @@ class InteractiveMemorySystem:
         }
     
     def display_search_results(self, results: Dict[str, List]):
-        """Display search results with layer indicators including temporary memory"""
+        """Display search results with FULL FIELD VISIBILITY for observability"""
         total = sum(len(v) for v in results.values())
         
         print(f"\n{'='*70}")
-        print(f"  SEARCH RESULTS: {total} items found | USER: {self.user_id}")
+        print(f"  RETRIEVAL RESULTS: {total} items found | USER: {self.user_id}")
         print(f"{'='*70}\n")
         
         # Temporary Memory (PRIORITY - Most Recent)
         if results.get('temp_memory'):
-            print(f"⚡ TEMPORARY MEMORY → cache ({len(results['temp_memory'])} results)")
-            for item in results['temp_memory']:
-                print(f"   Role: {item['role']}")
-                print(f"   Content: {item['content'][:100]}...")
-                print(f"   Time: {item['created_at']}")
+            print(f"⚡ TEMPORARY MEMORY (Redis Cache - Last 15 chats)")
+            print(f"   ├─ Source: Redis (Unified Cloud)")
+            print(f"   ├─ Count: {len(results['temp_memory'])}")
+            print(f"   └─ Layer: TEMPORARY/SHORT-TERM\n")
+            for i, item in enumerate(results['temp_memory'], 1):
+                print(f"   [{i}] 🔹 Role: {item.get('role', 'N/A')}")
+                print(f"       ├─ Content: {item.get('content', 'N/A')[:200]}")
+                print(f"       ├─ Created: {item.get('created_at', 'N/A')}")
+                print(f"       ├─ Source Layer: {item.get('source_layer', 'TEMP_MEMORY')}")
+                print(f"       ├─ Table: {item.get('table_name', 'redis_cache')}")
+                print(f"       └─ Storage: Redis temp cache (TTL: 24h)")
                 print()
         
         # Semantic Knowledge
         if results['semantic_knowledge']:
-            print(f"📚 SEMANTIC LAYER → knowledge_base ({len(results['semantic_knowledge'])} results)")
-            for item in results['semantic_knowledge']:
-                print(f"   ID: {item['id']} | Category: {item['category']}")
-                print(f"   Content: {item['content'][:100]}...")
-                print(f"   Created: {item['created_at']}")
+            print(f"📚 SEMANTIC MEMORY → knowledge_base")
+            print(f"   ├─ Table: knowledge_base")
+            print(f"   ├─ Count: {len(results['semantic_knowledge'])}")
+            print(f"   └─ Layer: SEMANTIC (Long-term facts)\n")
+            for i, item in enumerate(results['semantic_knowledge'], 1):
+                print(f"   [{i}] 📘 ID: {item['id']}")
+                print(f"       ├─ Content: {item['content'][:200]}")
+                print(f"       ├─ Category: {item['category']}")
+                print(f"       ├─ User ID: {self.user_id}")
+                print(f"       ├─ Created: {item['created_at']}")
+                print(f"       ├─ Source Layer: {item['source_layer']}")
+                print(f"       └─ Table: {item['table_name']}")
                 print()
         
         # Semantic Persona
         if results['semantic_persona']:
-            print(f"👤 SEMANTIC LAYER → user_persona ({len(results['semantic_persona'])} results)")
-            for item in results['semantic_persona']:
-                print(f"   ID: {item['id']} | Name: {item['name']}")
-                print(f"   Interests: {item['interests']}")
+            print(f"📚 SEMANTIC MEMORY → user_persona")
+            print(f"   ├─ Table: user_persona")
+            print(f"   ├─ Count: {len(results['semantic_persona'])}")
+            print(f"   └─ Layer: SEMANTIC (User identity)\n")
+            for i, item in enumerate(results['semantic_persona'], 1):
+                print(f"   [{i}] 👤 ID: {item['id']}")
+                print(f"       ├─ Name: {item.get('name', 'N/A')}")
+                print(f"       ├─ Interests: {item.get('interests', 'N/A')}")
+                print(f"       ├─ Expertise: {item.get('expertise_areas', 'N/A')}")
+                print(f"       ├─ User ID: {self.user_id}")
+                print(f"       ├─ Source Layer: {item['source_layer']}")
+                print(f"       └─ Table: {item['table_name']}")
                 print()
         
         # Episodic Messages
         if results['episodic_messages']:
-            print(f"📅 EPISODIC LAYER → super_chat_messages ({len(results['episodic_messages'])} results)")
-            for item in results['episodic_messages']:
-                print(f"   ID: {item['id']} | Role: {item['role']}")
-                print(f"   Content: {item['content'][:100]}...")
-                print(f"   Time: {item['created_at']}")
+            print(f"📅 EPISODIC MEMORY → super_chat_messages")
+            print(f"   ├─ Table: super_chat_messages")
+            print(f"   ├─ Count: {len(results['episodic_messages'])}")
+            print(f"   └─ Layer: EPISODIC (Temporal conversations)\n")
+            for i, item in enumerate(results['episodic_messages'], 1):
+                print(f"   [{i}] 💬 Message ID: {item['id']}")
+                print(f"       ├─ Role: {item['role']}")
+                print(f"       ├─ Content: {item['content'][:200]}")
+                print(f"       ├─ Chat ID: {self.current_chat_id}")
+                print(f"       ├─ User ID: {self.user_id}")
+                print(f"       ├─ Created: {item['created_at']}")
+                print(f"       ├─ Source Layer: {item['source_layer']}")
+                print(f"       └─ Table: {item['table_name']}")
                 print()
         
         # Episodic Episodes
         if results['episodic_episodes']:
-            print(f"📖 EPISODIC LAYER → episodes ({len(results['episodic_episodes'])} results)")
-            for item in results['episodic_episodes']:
-                print(f"   ID: {item['id']} | Messages: {item['message_count']}")
+            print(f"📅 EPISODIC MEMORY → episodes")
+            print(f"   ├─ Table: episodes")
+            print(f"   ├─ Count: {len(results['episodic_episodes'])}")
+            print(f"   └─ Layer: EPISODIC (Summarized sessions)\n")
+            for i, item in enumerate(results['episodic_episodes'], 1):
+                print(f"   [{i}] 📖 Episode ID: {item['id']}")
+                print(f"       ├─ Message Count: {item['message_count']}")
+                print(f"       ├─ Source Type: {item['source_type']}")
                 messages = json.loads(item['messages']) if isinstance(item['messages'], str) else item['messages']
-                first_msg = messages[0]['content'][:80] if messages else 'No messages'
-                print(f"   Preview: {first_msg}...")
-                print(f"   Created: {item['created_at']}")
+                first_msg = messages[0]['content'][:100] if messages else 'No messages'
+                print(f"       ├─ Messages Preview: {first_msg}...")
+                print(f"       ├─ User ID: {self.user_id}")
+                print(f"       ├─ Created: {item['created_at']}")
+                print(f"       ├─ Source Layer: {item['source_layer']}")
+                print(f"       └─ Table: {item['table_name']}")
                 print()
         
         if total == 0:
