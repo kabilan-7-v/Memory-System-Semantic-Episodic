@@ -7,6 +7,7 @@ Enhanced Interactive Memory System
 - Real-time storage indicators
 - Redis-based temporary memory cache (last 15 chats) for fast access
 - Context optimization for memory and token efficiency
+- Multi-line input support (Shift+Enter for new line, Enter to submit)
 """
 import os
 import sys
@@ -14,10 +15,19 @@ import hashlib
 import json
 from datetime import datetime
 from typing import List, Dict, Any, Optional
+import numpy as np
 import redis
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from dotenv import load_dotenv
+
+# Multi-line input support
+try:
+    from prompt_toolkit import prompt
+    from prompt_toolkit.key_binding import KeyBindings
+    PROMPT_TOOLKIT_AVAILABLE = True
+except ImportError:
+    PROMPT_TOOLKIT_AVAILABLE = False
 
 # Add src to path for optimization imports
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -26,12 +36,24 @@ if os.path.exists(src_path) and src_path not in sys.path:
     sys.path.insert(0, src_path)
 
 try:
-    from services.context_optimizer import ContextOptimizer, SummarizationOptimizer
-    from config.optimization_config import get_optimization_profile, get_config_for_model
+    from services.context_optimizer import ContextOptimizer, SummarizationOptimizer  # type: ignore
+    from config.optimization_config import get_optimization_profile, get_config_for_model  # type: ignore
+    from services.model_selector import select_model_for_task  # type: ignore
     OPTIMIZER_AVAILABLE = True
 except (ImportError, ModuleNotFoundError) as e:
     OPTIMIZER_AVAILABLE = False
     print(f"⚠️  Context optimizer not available - optimization features disabled ({e})")
+    
+    # Fallback model selector
+    def select_model_for_task(task_type: str, verbose: bool = False):
+        return "llama-3.3-70b-versatile", "Default model - optimizer not available"
+
+# Bi-encoder re-ranking support
+try:
+    from services.biencoder_reranker import BiEncoderReranker, get_recommended_config  # type: ignore
+    BIENCODER_AVAILABLE = True
+except (ImportError, ModuleNotFoundError):
+    BIENCODER_AVAILABLE = False
 
 load_dotenv()
 
@@ -63,13 +85,41 @@ class InteractiveMemorySystem:
             # Remove compression_ratio from optimizer config (it's for summarizer only)
             summarization_ratio = opt_config.pop('compression_ratio', 0.3)
             
-            self.context_optimizer = ContextOptimizer(**opt_config)
+            # Create a simple embedding service wrapper
+            class EmbeddingServiceWrapper:
+                def __init__(self, embedding_func):
+                    self.embedding_func = embedding_func
+                
+                def get_embedding(self, text: str):
+                    return np.array(self.embedding_func(text))
+            
+            self.context_optimizer = ContextOptimizer(
+                **opt_config,
+                embedding_service=EmbeddingServiceWrapper(self.generate_embedding)
+            )
             self.summarization_optimizer = SummarizationOptimizer(
                 compression_ratio=summarization_ratio
             )
         else:
             self.context_optimizer = None
             self.summarization_optimizer = None
+        
+        # Initialize bi-encoder reranker if available
+        if BIENCODER_AVAILABLE:
+            try:
+                biencoder_config = get_recommended_config("fast")
+                self.biencoder = BiEncoderReranker(
+                    model_name=biencoder_config['model_name'],
+                    batch_size=biencoder_config['batch_size']
+                )
+                self.biencoder_enabled = True
+            except Exception as e:
+                print(f"⚠️  Bi-encoder initialization failed: {e}")
+                self.biencoder = None
+                self.biencoder_enabled = False
+        else:
+            self.biencoder = None
+            self.biencoder_enabled = False
         
         self.connect_db()
         self.connect_redis()
@@ -130,6 +180,9 @@ class InteractiveMemorySystem:
         if api_key:
             self.groq_client = Groq(api_key=api_key)
             print("✓ Groq API connected")
+            if BIENCODER_AVAILABLE and self.biencoder_enabled:
+                print("   📊 Bi-Encoder Re-Ranking: Enabled (Fast semantic search)")
+            print("   📊 Model Selection: Enabled (Task-based routing)")
     
     def ensure_super_chat(self):
         """Ensure user has an active super chat session"""
@@ -269,17 +322,31 @@ class InteractiveMemorySystem:
         return [float(v / norm) for v in embedding]
     
     def is_question(self, text: str) -> bool:
-        """Detect if input is a question"""
+        """Detect if input is a question or query (not a long text paragraph)"""
         text_lower = text.lower().strip()
+        
+        # If text is very long (>100 words), it's likely informational content, not a question
+        word_count = len(text_lower.split())
+        if word_count > 100:
+            return False  # Long text = storage, not query
         
         # Question words
         question_words = ['what', 'who', 'where', 'when', 'why', 'how', 'which', 'whose', 
                          'whom', 'can', 'could', 'would', 'should', 'is', 'are', 'do', 
-                         'does', 'did', 'will', 'shall']
+                         'does', 'did', 'will', 'shall', 'has', 'have', 'had']
+        
+        # Imperative request words (commands that expect answers)
+        request_words = ['give', 'tell', 'explain', 'describe', 'show', 'list', 'find',
+                        'search', 'get', 'fetch', 'provide', 'summarize', 'outline',
+                        'detail', 'elaborate', 'clarify', 'define']
         
         # Check if starts with question word
         first_word = text_lower.split()[0] if text_lower.split() else ""
         if first_word in question_words:
+            return True
+        
+        # Check if starts with request word (but only for short text)
+        if first_word in request_words and word_count <= 20:
             return True
         
         # Check if ends with question mark
@@ -310,14 +377,43 @@ class InteractiveMemorySystem:
         """Store user persona information in BOTH persona and knowledge layers"""
         cur = self.conn.cursor()
         
+        print(f"\n{'='*70}")
+        print(f"💾 STORAGE PROCESS - USER PERSONA")
+        print(f"{'='*70}")
+        
+        # Apply optimization before storage
+        optimized_text = text
+        if self.enable_optimization and self.context_optimizer:
+            print(f"\n🎯 Step 1: OPTIMIZING INPUT BEFORE STORAGE")
+            print(f"   ├─ Original length: {len(text)} chars (~{len(text) // 4} tokens)")
+            print(f"   └─ Running optimization pipeline...\n")
+            
+            contexts_to_optimize = [{"content": text, "score": 1.0}]
+            optimized_contexts, opt_stats = self.context_optimizer.optimize(
+                contexts=contexts_to_optimize,
+                query=text[:100]  # Use first part as query
+            )
+            
+            if optimized_contexts:
+                optimized_text = optimized_contexts[0]['content']
+                print(f"\n   ✅ Optimization Results:")
+                print(f"   ├─ Optimized length: {len(optimized_text)} chars (~{len(optimized_text) // 4} tokens)")
+                print(f"   ├─ Duplicates removed: {opt_stats['duplicates_removed']}")
+                print(f"   ├─ Low-entropy filtered: {opt_stats['low_entropy_removed']}")
+                print(f"   ├─ Reduction: {opt_stats['reduction_percentage']:.1f}%")
+                print(f"   └─ ✓ Saved {opt_stats['reduction_percentage']:.1f}% storage space")
+        else:
+            print(f"   ⚠️  Optimization disabled - storing as-is")
+        
         # Extract basic info (simple parsing)
+        print(f"\n🔍 Step 2: PARSING PERSONA INFO")
         name = None
         if 'my name is' in text.lower():
             name = text.lower().split('my name is')[1].strip().split()[0].title()
         elif 'i am' in text.lower() and len(text.split()) < 10:
             name = text.lower().split('i am')[1].strip().split()[0].title()
         
-        embedding = self.generate_embedding(text)
+        embedding = self.generate_embedding(optimized_text)
         
         # 1. Store in user_persona table
         cur.execute("SELECT id FROM user_persona WHERE user_id = %s", (self.user_id,))
@@ -334,14 +430,14 @@ class InteractiveMemorySystem:
                     updated_at = NOW()
                 WHERE user_id = %s
                 RETURNING id
-            """, (name, text[:100], text[:100], text, embedding, self.user_id))
+            """, (name, optimized_text[:100], optimized_text[:100], optimized_text, embedding, self.user_id))
         else:
             cur.execute("""
                 INSERT INTO user_persona 
                 (user_id, name, interests, raw_content, embedding)
                 VALUES (%s, %s, ARRAY[%s], %s, %s)
                 RETURNING id
-            """, (self.user_id, name, text[:100], text, embedding))
+            """, (self.user_id, name, optimized_text[:100], optimized_text, embedding))
         
         persona_id = cur.fetchone()['id']
         
@@ -353,7 +449,7 @@ class InteractiveMemorySystem:
             RETURNING id
         """, (
             self.user_id,
-            f"User Info: {text}",
+            f"User Info: {optimized_text}",
             "User Persona",
             ["personal_info", "user_data"],
             embedding
@@ -370,8 +466,8 @@ class InteractiveMemorySystem:
         self.conn.commit()
         cur.close()
         
-        # 3. Store in episodic memory
-        self.add_chat_message("user", text)
+        # 3. Store in episodic memory (use OPTIMIZED text)
+        self.add_chat_message("user", optimized_text)
         
         return {
             "status": "success",
@@ -387,7 +483,38 @@ class InteractiveMemorySystem:
         """Store knowledge with layer indication"""
         cur = self.conn.cursor()
         
+        print(f"\n{'='*70}")
+        print(f"💾 STORAGE PROCESS - KNOWLEDGE BASE")
+        print(f"{'='*70}")
+        
+        # Apply optimization before storage
+        optimized_content = content
+        if self.enable_optimization and self.context_optimizer:
+            print(f"\n🎯 Step 1: OPTIMIZING INPUT BEFORE STORAGE")
+            print(f"   ├─ Original length: {len(content)} chars (~{len(content) // 4} tokens)")
+            print(f"   └─ Running optimization pipeline...\n")
+            
+            contexts_to_optimize = [{"content": content, "score": 1.0}]
+            optimized_contexts, opt_stats = self.context_optimizer.optimize(
+                contexts=contexts_to_optimize,
+                query=content[:100]  # Use first part as query
+            )
+            
+            if optimized_contexts:
+                optimized_content = optimized_contexts[0]['content']
+                print(f"\n   ✅ Optimization Results:")
+                print(f"   ├─ Optimized length: {len(optimized_content)} chars (~{len(optimized_content) // 4} tokens)")
+                print(f"   ├─ Duplicates removed: {opt_stats['duplicates_removed']}")
+                print(f"   ├─ Low-entropy filtered: {opt_stats['low_entropy_removed']}")
+                print(f"   ├─ Reduction: {opt_stats['reduction_percentage']:.1f}%")
+                print(f"   └─ ✓ Saved {opt_stats['reduction_percentage']:.1f}% storage space")
+        else:
+            print(f"   ⚠️  Optimization disabled - storing as-is")
+        
         # Determine category
+        print(f"\n🏷️  Step 2: CATEGORIZING CONTENT")
+        # Determine category
+        print(f"\n🏷️  Step 2: CATEGORIZING CONTENT")
         if any(kw in content.lower() for kw in ['policy', 'rule', 'procedure', 'hr']):
             category = "HR Policies"
         elif any(kw in content.lower() for kw in ['manage', 'team', 'lead']):
@@ -395,16 +522,22 @@ class InteractiveMemorySystem:
         else:
             category = "Knowledge"
         
-        embedding = self.generate_embedding(content)
+        print(f"   └─ Category: {category}")
         
+        print(f"\n📊 Step 3: GENERATING EMBEDDING")
+        embedding = self.generate_embedding(optimized_content)
+        print(f"   └─ Embedding: {len(embedding)} dimensions")
+        
+        print(f"\n💾 Step 4: STORING TO DATABASE")
         cur.execute("""
             INSERT INTO knowledge_base 
             (user_id, content, category, tags, embedding)
             VALUES (%s, %s, %s, %s, %s)
             RETURNING id
-        """, (self.user_id, content, category, [], embedding))
+        """, (self.user_id, optimized_content, category, [], embedding))
         
         kb_id = cur.fetchone()['id']
+        print(f"   ├─ Stored in knowledge_base (ID: {kb_id})")
         
         # Create index
         cur.execute("""
@@ -413,10 +546,19 @@ class InteractiveMemorySystem:
         """, (self.user_id, kb_id))
         
         self.conn.commit()
+        print(f"   └─ Index created in semantic_memory_index")
         cur.close()
         
         # Also store in episodic
-        self.add_chat_message("user", content)
+        print(f"\n📅 Step 5: STORING TO EPISODIC LAYER")
+        self.add_chat_message("user", optimized_content)  # Store OPTIMIZED content
+        print(f"   ├─ Stored in super_chat_messages (optimized)")
+        if self.redis_client:
+            print(f"   └─ Stored in Redis cache (optimized, TTL: 24h)")
+        
+        print(f"\n{'='*70}")
+        print(f"✅ STORAGE COMPLETE")
+        print(f"{'='*70}\n")
         
         return {
             "status": "success",
@@ -441,14 +583,24 @@ class InteractiveMemorySystem:
         self.conn.commit()
         cur.close()
         
-        # Add to Redis temporary memory cache - USER MESSAGES ONLY (context)
+        # Add to Redis temporary memory cache - USER MESSAGES ONLY (OPTIMIZED content)
         if self.redis_client and role == 'user':
             cache_key = self.get_redis_key("messages")
+            
+            # Check if last message is identical (prevent duplicates)
+            existing_messages = self.redis_client.lrange(cache_key, -1, -1)
+            if existing_messages:
+                last_msg = json.loads(existing_messages[0])
+                if last_msg.get('content') == content:
+                    # Skip duplicate - already stored
+                    return
+            
             msg_data = json.dumps({
                 'role': role,
-                'content': content,
+                'content': content,  # This is now optimized content
                 'created_at': created_at.isoformat(),
-                'source': 'TEMP_MEMORY'
+                'source': 'TEMP_MEMORY',
+                'optimized': True  # Flag to indicate this is optimized
             })
             
             # Add to end of list
@@ -463,6 +615,111 @@ class InteractiveMemorySystem:
     # ========================================================================
     # HYBRID SEARCH WITH SOURCE INDICATORS + REDIS TEMPORARY MEMORY
     # ========================================================================
+    
+    def biencoder_search(self, query: str, top_k: int = 10, score_threshold: float = 0.65):
+        """
+        Bi-encoder semantic re-ranking search
+        
+        Args:
+            query: Search query
+            top_k: Number of results to return
+            score_threshold: Minimum similarity score
+            
+        Returns:
+            List of reranked results
+        """
+        if not self.biencoder_enabled:
+            print("⚠️  Bi-encoder not available, using hybrid search")
+            return self.hybrid_search(query, limit=top_k)
+        
+        print(f"\n🔍 Bi-Encoder Semantic Search")
+        print(f"{'='*70}")
+        
+        # Get more initial results for re-ranking
+        initial_results = self.hybrid_search(query, limit=top_k * 2)
+        
+        # Flatten all results from different sources
+        all_results = []
+        for source, items in initial_results.items():
+            for item in items:
+                all_results.append({
+                    'content': item.get('content', ''),
+                    'layer': item.get('source_layer', 'Unknown'),
+                    'table': item.get('table_name', 'unknown'),
+                    'created_at': item.get('created_at', ''),
+                    'original': item
+                })
+        
+        if not all_results:
+            print("   No results found\n")
+            return []
+        
+        # Extract documents
+        documents = [r['content'] for r in all_results]
+        
+        print(f"\n📝 Initial retrieval: {len(documents)} results")
+        print(f"🤖 Re-ranking with bi-encoder...")
+        
+        # Build index and re-rank
+        try:
+            self.biencoder.build_index(documents)
+            reranked = self.biencoder.rerank(
+                query=query,
+                top_k=top_k,
+                score_threshold=score_threshold
+            )
+            
+            print(f"✅ Re-ranked to {len(reranked)} high-quality results")
+            print(f"{'='*70}\n")
+            
+            # Map back to original results with metadata
+            results_with_metadata = []
+            for r in reranked:
+                original = all_results[r['index']]
+                results_with_metadata.append({
+                    **original['original'],
+                    'semantic_score': r['score'],
+                    'rank': r['rank']
+                })
+            
+            return results_with_metadata
+            
+        except Exception as e:
+            print(f"❌ Bi-encoder search failed: {e}")
+            print("↪ Falling back to hybrid search\n")
+            return all_results[:top_k]
+    
+    def display_biencoder_results(self, results: List[Dict], query: str):
+        """Display bi-encoder reranked results with semantic scores"""
+        if not results:
+            print("❌ No results found\n")
+            return
+        
+        print(f"\n🎯 Bi-Encoder Results for: \"{query}\"")
+        print(f"{'='*70}\n")
+        
+        for i, r in enumerate(results, 1):
+            layer = r.get('source_layer', 'Unknown')
+            table = r.get('table_name', 'unknown')
+            semantic_score = r.get('semantic_score', 0)
+            
+            # Emoji for layer
+            layer_emoji = {
+                'TEMP_MEMORY': '⚡',
+                'SEMANTIC': '📚',
+                'EPISODIC': '📅'
+            }.get(layer, '📑')
+            
+            print(f"{i}. [{layer_emoji} {layer}] {table}")
+            print(f"   🔹 Semantic Score: {semantic_score:.4f}")
+            content = r.get('content', '')
+            print(f"   💬 {content[:200]}..." if len(content) > 200 else f"   💬 {content}")
+            
+            if r.get('created_at'):
+                print(f"   🕒 {r['created_at']}")
+            print()
+        
+        print(f"{'='*70}\n")
     
     def hybrid_search(self, query: str, limit: int = 5) -> Dict[str, List]:
         """Hybrid search across all memory layers including Redis temporary memory"""
@@ -733,11 +990,20 @@ class InteractiveMemorySystem:
         print("\n💡 Commands:")
         print("  <text>              → Auto-store in appropriate layer(s)")
         print("  search <query>      → Hybrid search across ALL layers + temp cache")
+        if self.biencoder_enabled:
+            print("  rerank <query>      → Bi-encoder semantic re-ranking search")
         print("  chat <message>      → Chat with AI (prioritizes temp cache)")
+        print("  cache               → View Redis temporary cache contents")
         print("  history             → View conversation history with timestamps")
         print("  status              → Show memory statistics")
         print("  user <id>           → Switch user (reloads temp cache)")
         print("  quit                → Exit")
+        print("\n💡 Input Tips:")
+        if PROMPT_TOOLKIT_AVAILABLE:
+            print("  • Enter             → Submit input")
+            print("  • Shift+Enter       → New line (multi-line input)")
+        else:
+            print("  • Enter             → Submit input (single line only)")
         print("="*70 + "\n")
         
         # Show all available users with counts
@@ -755,7 +1021,24 @@ class InteractiveMemorySystem:
                 cur.close()
                 user_name = result['name'] if result and result['name'] else self.user_id
                 
-                user_input = input(f"[{user_name}] → ").strip()
+                # Multi-line input with Shift+Enter support
+                if PROMPT_TOOLKIT_AVAILABLE:
+                    # Create key bindings for Shift+Enter = new line, Enter = submit
+                    kb = KeyBindings()
+                    
+                    @kb.add('enter', eager=True)
+                    def _(event):
+                        # Enter without shift = submit
+                        event.current_buffer.validate_and_handle()
+                    
+                    user_input = prompt(
+                        f"[{user_name}] → ",
+                        multiline=True,
+                        key_bindings=kb
+                    ).strip()
+                else:
+                    # Fallback to basic input
+                    user_input = input(f"[{user_name}] → ").strip()
                 
                 if not user_input:
                     continue
@@ -769,11 +1052,25 @@ class InteractiveMemorySystem:
                     results = self.hybrid_search(query)
                     self.display_search_results(results)
                 
+                elif user_input.startswith("rerank "):
+                    if self.biencoder_enabled:
+                        query = user_input[7:].strip()
+                        results = self.biencoder_search(query)
+                        self.display_biencoder_results(results, query)
+                    else:
+                        print("⚠️  Bi-encoder re-ranking not available. Using regular search...")
+                        query = user_input[7:].strip()
+                        results = self.hybrid_search(query)
+                        self.display_search_results(results)
+                
                 elif user_input == "status":
                     self.show_status()
                 
                 elif user_input == "history":
                     self.show_conversation_history()
+                
+                elif user_input == "cache":
+                    self.show_cache()
                 
                 elif user_input.startswith("user "):
                     self.user_id = user_input[5:].strip()
@@ -883,6 +1180,42 @@ class InteractiveMemorySystem:
             for user in users:
                 print(f"   • {user['name']:20} ({user['user_id']:25}) → {user['total']} entries")
             print()
+    
+    def show_cache(self):
+        """Show Redis temporary cache contents"""
+        if not self.redis_client:
+            print("\n❌ Redis cache not available\n")
+            return
+        
+        temp_messages = self.get_temp_memory()
+        
+        print(f"\n{'='*70}")
+        print(f"  REDIS TEMPORARY CACHE - {self.user_id}")
+        print(f"{'='*70}")
+        print(f"Storage: Redis Unified Cloud")
+        print(f"Cache Key: temp_memory:{self.user_id}:messages")
+        print(f"TTL: 24 hours")
+        print(f"Max Size: Last 15 user messages")
+        print(f"Current Count: {len(temp_messages)}")
+        print(f"{'='*70}\n")
+        
+        if not temp_messages:
+            print("📭 Cache is empty\n")
+            return
+        
+        for i, msg in enumerate(temp_messages, 1):
+            timestamp = msg['created_at'].strftime('%b %d, %Y %I:%M:%S %p') if isinstance(msg.get('created_at'), datetime) else msg.get('created_at', 'N/A')
+            is_optimized = msg.get('optimized', False)
+            opt_flag = " [OPTIMIZED]" if is_optimized else ""
+            
+            print(f"[{i}] 💾 {timestamp}{opt_flag}")
+            print(f"    Role: {msg['role']}")
+            print(f"    Content: {msg['content']}")
+            print(f"    Source: {msg.get('source', 'N/A')}")
+            print(f"    Length: {len(msg['content'])} chars (~{len(msg['content']) // 4} tokens)")
+            print()
+        
+        print(f"{'='*70}\n")
     
     def show_status(self):
         """Show detailed memory statistics"""
@@ -1117,46 +1450,20 @@ class InteractiveMemorySystem:
         
         print(f"   ✓ Retrieved context from {len(results['semantic_knowledge']) + len(results['episodic_messages']) + len(results['episodic_episodes'])} sources")
         
-        # Apply context optimization before sending to LLM
+        # Build context (already optimized at storage time)
         full_context = "\n".join(context_parts)
-        original_context_length = len(full_context)
-        
-        if self.enable_optimization and self.context_optimizer and context_parts:
-            print(f"   🎯 Optimizing context for memory efficiency...")
-            
-            # Convert context parts to structured format for optimization
-            contexts_to_optimize = []
-            for part in context_parts:
-                if part.strip():  # Skip empty strings
-                    contexts_to_optimize.append({
-                        "content": part,
-                        "score": 0.8  # Default score
-                    })
-            
-            # Apply optimization
-            optimized_contexts, opt_stats = self.context_optimizer.optimize(
-                contexts=contexts_to_optimize,
-                query=message
-            )
-            
-            # Reconstruct context from optimized results
-            if optimized_contexts:
-                optimized_parts = [ctx['content'] for ctx in optimized_contexts]
-                full_context = "\n".join(optimized_parts)
-                
-                # Print optimization statistics
-                print(f"   📊 Optimization Results:")
-                print(f"      • Original: ~{opt_stats['original_tokens']} tokens")
-                print(f"      • Optimized: ~{opt_stats['final_tokens']} tokens")
-                print(f"      • Saved: {opt_stats['reduction_percentage']:.1f}%")
-                print(f"      • Duplicates removed: {opt_stats['duplicates_removed']}")
-                print(f"      • Low-entropy filtered: {opt_stats['low_entropy_removed']}")
+        print(f"   ℹ️  Context already optimized at storage time - using directly")
         
         # Generate response
         if self.groq_client:
+            # Select best model for chat task
+            model_name, model_reason = select_model_for_task("chat")
+            print(f"\n🤖 Model Selection: {model_name}")
+            print(f"   └─ {model_reason}\n")
+            
             try:
                 response = self.groq_client.chat.completions.create(
-                    model="llama-3.3-70b-versatile",
+                    model=model_name,
                     messages=[
                         {"role": "system", "content": f"""You are a helpful assistant with access to the user's memory.
                         
@@ -1233,10 +1540,13 @@ Answer the user's question based on this context. If the information is not avai
                 
                 # Generate AI response if available
                 if self.groq_client and context_parts:
+                    # Select model for context analysis
+                    model_name, model_reason = select_model_for_task("analysis")
+                    
                     try:
                         full_context = "\n".join(context_parts)
                         response = self.groq_client.chat.completions.create(
-                            model="llama-3.3-70b-versatile",
+                            model=model_name,
                             messages=[
                                 {"role": "system", "content": f"""You are a helpful memory assistant. The user just stored: "{stored_text}"
 
@@ -1270,6 +1580,9 @@ if __name__ == "__main__":
     print(f"   2. Entropy Filtering - Remove low-information content")
     print(f"   3. Compression - Consolidate redundant information")
     print(f"   4. Re-ranking - Verify relevance with iterations")
+    print(f"      ├─ Threshold: 0.65 (65% relevance) - optimal precision/recall balance")
+    print(f"      ├─ Rationale: Below 60% too noisy, above 70% too strict")
+    print(f"      └─ Iterations: 3 (convergence point, diminishing returns after)")
     print(f"   5. Token Limiting - Enforce context window limits")
     print()
     

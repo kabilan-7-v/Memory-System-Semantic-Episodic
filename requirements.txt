@@ -10,3 +10,5 @@ flask>=3.0.0
 redis>=5.0.0
 hiredis>=3.0.0
 redisearch>=2.0.0
+prompt-toolkit>=3.0.0
+faiss-cpu>=1.7.4
