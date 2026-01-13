@@ -632,47 +632,63 @@ class InteractiveMemorySystem:
             print("⚠️  Bi-encoder not available, using hybrid search")
             return self.hybrid_search(query, limit=top_k)
         
-        print(f"\n🔍 Bi-Encoder Semantic Search")
+        print(f"\n{'='*70}")
+        print(f"🎯 BI-ENCODER SEMANTIC RE-RANKING PROCESS")
         print(f"{'='*70}")
+        print(f"Query: '{query}'")
+        print(f"Top K: {top_k}")
+        print(f"Score Threshold: {score_threshold}")
+        print(f"{'='*70}\n")
         
-        # Get more initial results for re-ranking
-        initial_results = self.hybrid_search(query, limit=top_k * 2)
-        
-        # Flatten all results from different sources
-        all_results = []
-        for source, items in initial_results.items():
-            for item in items:
-                all_results.append({
-                    'content': item.get('content', ''),
-                    'layer': item.get('source_layer', 'Unknown'),
-                    'table': item.get('table_name', 'unknown'),
-                    'created_at': item.get('created_at', ''),
-                    'original': item
-                })
-        
-        if not all_results:
-            print("   No results found\n")
-            return []
-        
-        # Extract documents
-        documents = [r['content'] for r in all_results]
-        
-        print(f"\n📝 Initial retrieval: {len(documents)} results")
-        print(f"🤖 Re-ranking with bi-encoder...")
-        
-        # Build index and re-rank
         try:
-            self.biencoder.build_index(documents)
+            # STEP 1: Get initial results from hybrid search
+            print(f"🔍 STEP 1: INITIAL HYBRID SEARCH")
+            print(f"Retrieving candidates from all memory layers...\n")
+            initial_results = self.hybrid_search(query, limit=top_k * 2)
+            
+            print(f"🔗 STEP 2: CANDIDATE PREPARATION")
+            print(f"Flattening results from all memory layers...\n")
+            
+            all_results = []
+            source_breakdown = {}
+            for source, items in initial_results.items():
+                source_breakdown[source] = len(items)
+                for item in items:
+                    all_results.append({
+                        'content': item.get('content', ''),
+                        'layer': item.get('source_layer', 'Unknown'),
+                        'table': item.get('table_name', 'unknown'),
+                        'created_at': item.get('created_at', ''),
+                        'original': item
+                    })
+            
+            if not all_results:
+                print("❌ No candidates found for re-ranking\n")
+                return []
+            
+            print(f"✓ Prepared {len(all_results)} candidates:")
+            for source, count in source_breakdown.items():
+                if count > 0:
+                    print(f"   ├─ {source}: {count} results")
+            print()
+            
+            # Extract documents
+            documents = [r['content'] for r in all_results]
+            
+            print(f"🤖 STEP 3: BI-ENCODER RE-RANKING")
+            print(f"Building semantic index and computing similarity scores...\n")
+            
+            # Build index and re-rank using biencoder
             reranked = self.biencoder.rerank(
                 query=query,
+                documents=documents,
                 top_k=top_k,
                 score_threshold=score_threshold
             )
             
-            print(f"✅ Re-ranked to {len(reranked)} high-quality results")
-            print(f"{'='*70}\n")
+            print(f"🔄 STEP 4: RESULT ENRICHMENT")
+            print(f"Adding semantic scores and rankings to results...\n")
             
-            # Map back to original results with metadata
             results_with_metadata = []
             for r in reranked:
                 original = all_results[r['index']]
@@ -682,11 +698,23 @@ class InteractiveMemorySystem:
                     'rank': r['rank']
                 })
             
+            print(f"✅ Results enriched with bi-encoder scores")
+            if reranked:
+                print(f"   Score range: [{min(r['score'] for r in reranked):.4f}, {max(r['score'] for r in reranked):.4f}]")
+            print(f"{'='*70}\n")
+            
             return results_with_metadata
             
         except Exception as e:
             print(f"❌ Bi-encoder search failed: {e}")
-            print("↪ Falling back to hybrid search\n")
+            print(f"↪ Falling back to hybrid search (returning top {top_k} without re-ranking)")
+            print(f"{'='*70}\n")
+            # Fallback to regular hybrid search
+            initial_results = self.hybrid_search(query, limit=top_k)
+            all_results = []
+            for source, items in initial_results.items():
+                for item in items:
+                    all_results.append(item)
             return all_results[:top_k]
     
     def display_biencoder_results(self, results: List[Dict], query: str):
@@ -1367,22 +1395,30 @@ class InteractiveMemorySystem:
                         continue
         
         # Get context via hybrid search
-        print(f"   🔍 Searching across all memory layers...")
+        print(f"\n{'='*70}")
+        print(f"📊 STEP 1: HYBRID SEARCH & RETRIEVAL")
+        print(f"{'='*70}")
         results = self.hybrid_search(message, limit=10)
         
         # Build comprehensive context
+        print(f"\n{'='*70}")
+        print(f"🔗 STEP 2: CONTEXT ASSEMBLY")
+        print(f"{'='*70}")
+        print(f"Building comprehensive context from retrieved sources...\n")
         context_parts = []
         
         # PRIORITY: Add Redis temporary memory first (last 15 chats - most recent context)
         if self.redis_client:
             temp_messages = self.get_temp_memory()
             if temp_messages:
+                print(f"⚡ Adding TEMP MEMORY: {len(temp_messages)} recent messages")
                 context_parts.append("\n⚡ RECENT REDIS CACHE (Last 15 chats):")
                 for msg in temp_messages:
                     timestamp = msg['created_at'].strftime('%b %d, %Y %I:%M %p') if msg.get('created_at') else 'Unknown time'
                     context_parts.append(f"- [{timestamp}] {msg['role']}: {msg['content']}")
         
         # Get user persona
+        print(f"👤 Adding USER PERSONA")
         cur = self.conn.cursor()
         cur.execute("""
             SELECT name, raw_content, interests, expertise_areas 
@@ -1400,11 +1436,14 @@ class InteractiveMemorySystem:
         
         # Add relevant knowledge
         if results['semantic_knowledge']:
+            print(f"📚 Adding SEMANTIC KNOWLEDGE: {len(results['semantic_knowledge'][:3])} entries")
             context_parts.append("\nRELEVANT KNOWLEDGE:")
             for item in results['semantic_knowledge'][:3]:
                 context_parts.append(f"- {item['content']}")
         
         # Add relevant messages WITH TIMESTAMPS (only if not already in temp_memory)
+        if results['episodic_messages']:
+            print(f"📅 Adding EPISODIC MESSAGES: {len(results['episodic_messages'][:10])} conversations")
         if results['episodic_messages']:
             context_parts.append("\nRECENT CONVERSATIONS (from history):")
             for item in results['episodic_messages'][:10]:
@@ -1439,8 +1478,7 @@ class InteractiveMemorySystem:
             else:
                 context_parts.append(f"\nNo conversations found for {query_date.strftime('%B %d, %Y')}")
         
-        # Add episodes
-        if results['episodic_episodes']:
+        # Adprint(f"📖 Adding EPISODES: {len(results['episodic_episodes'][:2])} episode summaries")
             context_parts.append("\nRELATED EPISODES:")
             for item in results['episodic_episodes'][:2]:
                 messages = json.loads(item['messages']) if isinstance(item['messages'], str) else item['messages']
@@ -1448,9 +1486,58 @@ class InteractiveMemorySystem:
         
         cur.close()
         
-        print(f"   ✓ Retrieved context from {len(results['semantic_knowledge']) + len(results['episodic_messages']) + len(results['episodic_episodes'])} sources")
+        total_sources = len(results['semantic_knowledge']) + len(results['episodic_messages']) + len(results['episodic_episodes'])
+        print(f"\n✅ Context assembly complete: {total_sources} sources integrated")
+        print(f"{'='*70}\n")
         
-        # Build context (already optimized at storage time)
+        # Build context
+        full_context = "\n".join(context_parts)
+        print(f"{'='*70}")
+        print(f"🤖 STEP 4: MODEL SELECTION & GENERATION")
+        print(f"{'='*70}")
+        
+        if self.groq_client:
+            # Select best model for chat task
+            model_name, model_reason = select_model_for_task("chat")
+            print(f"Selected Model: {model_name}")
+            print(f"Reason: {model_reason}")
+            print(f"Context size: {len(full_context)} chars (~{len(full_context) // 4} tokens)")
+            print(f"{'='*70}")
+        
+        print(f"\n{'='*70}")
+        print(f"🎯 STEP 3: CONTEXT OPTIMIZATION")
+        print(f"{'='*70}")
+        initial_tokens = len(full_context) // 4  # Rough token estimate
+        print(f"Initial context: {len(full_context)} chars (~{initial_tokens} tokens)\n")
+        
+        if self.enable_optimization and self.context_optimizer:
+            print(f"🔄 Running optimization pipeline...")
+            contexts_to_optimize = [{"content": full_context, "score": 1.0}]
+            optimized_contexts, opt_stats = self.context_optimizer.optimize(
+                contexts=contexts_to_optimize,
+                query=message
+            )
+            
+            if optimized_contexts:
+                full_context = optimized_contexts[0]['content']
+                print(f"\n✅ OPTIMIZATION RESULTS:")
+                print(f"   ├─ Original: {opt_stats['original_tokens']} tokens")
+                print(f"   ├─ Optimized: {opt_stats['final_tokens']} tokens")
+                print(f"   ├─ Reduction: {opt_stats['reduction_percentage']:.1f}%")
+                print(f"   ├─ Duplicates removed: {opt_stats['duplicates_removed']}")
+                print(f"   ├─ Diversity filtered: {opt_stats['diversity_filtered']}")
+                print(f"   ├─ Contradictions detected: {opt_stats['contradictions_detected']}")
+                print(f"   ├─ Low entropy removed: {opt_stats['low_entropy_removed']}")
+                print(f"   ├─ Compressed contexts: {opt_stats['compressed_count']}")
+                print(f"   ├─ Iterations: {opt_stats['iterations']}")
+                if opt_stats.get('adaptive_threshold_used'):
+                    print(f"   ├─ Adaptive threshold: {opt_stats['adaptive_threshold_used']:.3f}")
+                print(f"   └─ Final contexts: {opt_stats['final_count']}")
+                print(f"{'='*70}\n")
+        else:
+            print(f"⚠️  Optimization disabled - using context as-is")
+            print(f"{'='*70}\n")
+        
         full_context = "\n".join(context_parts)
         print(f"   ℹ️  Context already optimized at storage time - using directly")
         

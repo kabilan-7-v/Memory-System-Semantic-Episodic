@@ -2,16 +2,19 @@
 Context Optimization Service
 Optimizes memory retrieval for:
 - Deduplication (similarity-based)
+- Diversity sampling (balanced source representation)
+- Contradiction detection (identify conflicting information)
 - Entropy reduction (remove low-information content)
-- Compression (dimensional reduction)
+- Context-aware compression (preserve adjacent sentences)
+- Adaptive re-ranking (dynamic threshold adjustment)
 - Summarization (consolidate redundant information)
-- Re-ranking and verification with threshold-based iteration
 """
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple, Set
 import numpy as np
 from collections import defaultdict
 import hashlib
 import re
+import warnings
 
 
 class ContextOptimizer:
@@ -21,32 +24,40 @@ class ContextOptimizer:
     
     def __init__(
         self,
-        similarity_threshold: float = 0.85,
+        similarity_threshold: float = 0.80,
         entropy_threshold: float = 0.3,
         min_info_content: int = 10,
         max_context_tokens: int = 4000,
         rerank_threshold: float = 0.65,
         max_iterations: int = 3,
-        embedding_service = None
+        embedding_service = None,
+        max_per_source: int = 3,
+        enable_contradiction_detection: bool = True,
+        enable_adaptive_threshold: bool = True,
+        contradiction_threshold: float = 0.25
     ):
         """
         Args:
-            similarity_threshold: Cosine similarity threshold for duplicate detection (0-1)
+            similarity_threshold: Cosine similarity threshold for duplicate detection (0.7-0.85)
+                                 Default 0.80 (80%) - balanced deduplication
+                                 - 0.70-0.75: Aggressive dedup, may lose nuanced variants
+                                 - 0.76-0.82: Balanced (recommended range)
+                                 - 0.83-0.85: Conservative, keeps more variations
             entropy_threshold: Minimum entropy score to keep content (0-1)
             min_info_content: Minimum character length for meaningful content
             max_context_tokens: Maximum tokens allowed in final context
-            rerank_threshold: Minimum relevance score (0-1) for re-ranking iteration
-                             Default 0.65 (65%) chosen based on:
-                             - Below 0.6: Too permissive, allows weak matches
-                             - 0.65-0.7: Sweet spot - filters noise while keeping relevant context
-                             - Above 0.7: Too strict, may lose valuable peripheral information
-                             - Research shows 65% relevance balance precision/recall for RAG systems
+            rerank_threshold: Base minimum relevance score (0-1) - will be adapted if enabled
             max_iterations: Maximum re-ranking iterations (default 3)
-                           - 1 iteration: Basic filtering only
-                           - 2 iterations: Good for simple queries
-                           - 3 iterations: Optimal for complex queries (convergence point)
-                           - 4+ iterations: Diminishing returns, adds latency
+            max_per_source: Maximum contexts from same source (diversity sampling)
+            enable_contradiction_detection: Detect and flag contradicting information
+            enable_adaptive_threshold: Use adaptive reranking threshold based on score distribution
+            contradiction_threshold: Similarity threshold for contradiction detection (lower = more different)
         """
+        # Validate and clamp similarity_threshold to recommended range
+        if similarity_threshold < 0.7 or similarity_threshold > 0.85:
+            warnings.warn(f"similarity_threshold {similarity_threshold} outside recommended range [0.7, 0.85]. Clamping...")
+            similarity_threshold = max(0.7, min(0.85, similarity_threshold))
+        
         self.similarity_threshold = similarity_threshold
         self.entropy_threshold = entropy_threshold
         self.min_info_content = min_info_content
@@ -54,6 +65,10 @@ class ContextOptimizer:
         self.rerank_threshold = rerank_threshold
         self.max_iterations = max_iterations
         self.embedding_service = embedding_service
+        self.max_per_source = max_per_source
+        self.enable_contradiction_detection = enable_contradiction_detection
+        self.enable_adaptive_threshold = enable_adaptive_threshold
+        self.contradiction_threshold = contradiction_threshold
         
     def optimize(
         self,
@@ -62,7 +77,16 @@ class ContextOptimizer:
         embeddings: Optional[List[np.ndarray]] = None
     ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         """
-        Main optimization pipeline
+        Main optimization pipeline with clear sequential steps
+        
+        Pipeline Order:
+        1. Deduplication → Remove exact and semantic duplicates
+        2. Diversity Sampling → Ensure balanced source representation
+        3. Contradiction Detection → Identify conflicting information
+        4. Entropy Filtering → Remove low-information content
+        5. Context-Aware Compression → Extract relevant info with surrounding context
+        6. Adaptive Re-ranking → Score and filter with dynamic threshold
+        7. Token Limit Enforcement → Ensure final size constraints
         
         Args:
             contexts: List of context items with 'content' and optional 'score'
@@ -76,10 +100,13 @@ class ContextOptimizer:
             'original_count': len(contexts),
             'original_tokens': self._estimate_tokens(contexts),
             'duplicates_removed': 0,
+            'diversity_filtered': 0,
+            'contradictions_detected': 0,
             'low_entropy_removed': 0,
             'compressed_count': 0,
             'summarized_count': 0,
             'iterations': 0,
+            'adaptive_threshold_used': None,
             'final_count': 0,
             'final_tokens': 0,
             'reduction_percentage': 0
@@ -87,21 +114,78 @@ class ContextOptimizer:
         
         if not contexts:
             return [], stats
+        
+        print(f"\n{'='*70}")
+        print(f"🎯 CONTEXT OPTIMIZATION PIPELINE")
+        print(f"{'='*70}")
+        print(f"Input: {len(contexts)} contexts, ~{stats['original_tokens']} tokens")
+        print(f"Target: ≤{self.max_context_tokens} tokens\n")
             
-        # Step 1: Remove exact duplicates
+        # STEP 1: DEDUPLICATION
+        print(f"📋 STEP 1/7: DEDUPLICATION")
+        print(f"   ├─ Removing exact duplicates...")
         contexts = self._remove_exact_duplicates(contexts, stats)
-        
-        # Step 2: Remove similar/near-duplicate content
+        print(f"   ├─ Removing semantic duplicates (threshold: {self.similarity_threshold:.2f})...")
         contexts = self._remove_similar_duplicates(contexts, embeddings, stats)
+        print(f"   └─ Remaining: {len(contexts)} contexts\n")
         
-        # Step 3: Filter low-entropy content
+        # STEP 2: DIVERSITY SAMPLING
+        print(f"🎲 STEP 2/7: DIVERSITY SAMPLING")
+        print(f"   ├─ Ensuring balanced source representation (max {self.max_per_source} per source)...")
+        contexts = self._ensure_source_diversity(contexts, stats)
+        print(f"   └─ Remaining: {len(contexts)} contexts\n")
+        
+        # STEP 3: CONTRADICTION DETECTION
+        if self.enable_contradiction_detection:
+            print(f"⚠️  STEP 3/7: CONTRADICTION DETECTION")
+            print(f"   ├─ Analyzing for conflicting information...")
+            contexts = self._detect_contradictions(contexts, stats)
+            print(f"   └─ Contradictions flagged: {stats['contradictions_detected']}\n")
+        else:
+            print(f"⚠️  STEP 3/7: CONTRADICTION DETECTION [DISABLED]\n")
+        
+        # STEP 4: ENTROPY FILTERING
+        print(f"📊 STEP 4/7: ENTROPY FILTERING")
+        print(f"   ├─ Filtering low-information content (threshold: {self.entropy_threshold:.2f})...")
         contexts = self._filter_low_entropy(contexts, stats)
+        print(f"   └─ Remaining: {len(contexts)} contexts\n")
         
-        # Step 4: Compress and consolidate
+        # STEP 5: CONTEXT-AWARE COMPRESSION
+        print(f"🗜️  STEP 5/7: CONTEXT-AWARE COMPRESSION")
+        print(f"   ├─ Extracting relevant content while preserving context...")
         contexts = self._compress_contexts(contexts, query, stats)
+        print(f"   └─ Compressed: {stats['compressed_count']} contexts\n")
         
-        # Step 5: Re-rank and verify with iterations
+        # STEP 6: ADAPTIVE RE-RANKING
+        print(f"🔄 STEP 6/7: ADAPTIVE RE-RANKING")
+        if self.enable_adaptive_threshold:
+            print(f"   ├─ Using adaptive threshold (base: {self.rerank_threshold:.2f})...")
+        else:
+            print(f"   ├─ Using static threshold: {self.rerank_threshold:.2f}...")
         contexts = self._rerank_with_verification(contexts, query, stats)
+        print(f"   └─ Remaining: {len(contexts)} contexts after {stats['iterations']} iteration(s)\n")
+        
+        # STEP 7: TOKEN LIMIT ENFORCEMENT
+        print(f"✂️  STEP 7/7: TOKEN LIMIT ENFORCEMENT")
+        print(f"   ├─ Enforcing max {self.max_context_tokens} tokens...")
+        contexts = self._enforce_token_limit(contexts, stats)
+        print(f"   └─ Final: {len(contexts)} contexts\n")
+        
+        # Update final stats
+        stats['final_count'] = len(contexts)
+        stats['final_tokens'] = self._estimate_tokens(contexts)
+        stats['reduction_percentage'] = (
+            100 * (1 - stats['final_tokens'] / max(stats['original_tokens'], 1))
+        )
+        
+        print(f"{'='*70}")
+        print(f"✅ OPTIMIZATION COMPLETE")
+        print(f"   ├─ Reduction: {stats['reduction_percentage']:.1f}%")
+        print(f"   ├─ Tokens: {stats['original_tokens']} → {stats['final_tokens']}")
+        print(f"   └─ Contexts: {stats['original_count']} → {stats['final_count']}")
+        print(f"{'='*70}\n")
+        
+        return contexts, stats
         
         # Step 6: Final token limit enforcement
         contexts = self._enforce_token_limit(contexts, stats)
@@ -143,6 +227,94 @@ class ContextOptimizer:
                 stats['duplicates_removed'] += 1
                 
         return unique_contexts
+    
+    def _ensure_source_diversity(
+        self,
+        contexts: List[Dict[str, Any]],
+        stats: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        """
+        Ensure balanced representation from different sources
+        Prevents over-representation from single source
+        """
+        source_counts = {}
+        diverse_contexts = []
+        
+        for ctx in contexts:
+            # Try multiple source identifiers
+            source = (
+                ctx.get('source_id') or 
+                ctx.get('source_layer') or 
+                ctx.get('table_name') or 
+                'unknown'
+            )
+            
+            if source_counts.get(source, 0) < self.max_per_source:
+                diverse_contexts.append(ctx)
+                source_counts[source] = source_counts.get(source, 0) + 1
+            else:
+                stats['diversity_filtered'] += 1
+        
+        return diverse_contexts
+    
+    def _detect_contradictions(
+        self,
+        contexts: List[Dict[str, Any]],
+        stats: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        """
+        Detect contradicting information across contexts
+        Flags contradictions but keeps both for user awareness
+        """
+        if not self.embedding_service or len(contexts) < 2:
+            return contexts
+        
+        # Negation patterns that often indicate contradictions
+        negation_patterns = [
+            r'\bnot\b', r'\bno\b', r'\bnever\b', r'\bnone\b',
+            r'\bdidn\'t\b', r'\bisn\'t\b', r'\bwasn\'t\b', r'\baren\'t\b',
+            r'\bhaven\'t\b', r'\bhasn\'t\b', r'\bwon\'t\b', r'\bcan\'t\b'
+        ]
+        
+        # Compare each pair of contexts
+        for i, ctx1 in enumerate(contexts):
+            content1 = self._get_content(ctx1).lower()
+            
+            for j, ctx2 in enumerate(contexts[i+1:], start=i+1):
+                content2 = self._get_content(ctx2).lower()
+                
+                # Check if contents are similar but opposite
+                try:
+                    emb1 = self.embedding_service.get_embedding(content1)
+                    emb2 = self.embedding_service.get_embedding(content2)
+                    similarity = self._cosine_similarity(emb1, emb2)
+                    
+                    # Similar content with opposite sentiment/negation = potential contradiction
+                    has_negation_1 = any(re.search(p, content1) for p in negation_patterns)
+                    has_negation_2 = any(re.search(p, content2) for p in negation_patterns)
+                    
+                    # High similarity + XOR negation = likely contradiction
+                    if (similarity > self.similarity_threshold - 0.15 and 
+                        has_negation_1 != has_negation_2):
+                        
+                        # Flag both contexts as contradicting
+                        if 'contradicts_with' not in ctx1:
+                            ctx1['contradicts_with'] = []
+                        if 'contradicts_with' not in ctx2:
+                            ctx2['contradicts_with'] = []
+                        
+                        ctx1['contradicts_with'].append(j)
+                        ctx2['contradicts_with'].append(i)
+                        ctx1['has_contradiction'] = True
+                        ctx2['has_contradiction'] = True
+                        
+                        stats['contradictions_detected'] += 1
+                        print(f"   ├─ ⚠️  Contradiction detected between context {i} and {j}")
+                        
+                except Exception as e:
+                    continue
+        
+        return contexts
     
     def _remove_duplicate_sentences(self, text: str, stats: Dict[str, Any]) -> str:
         """Remove duplicate sentences (exact text + semantic meaning)"""
@@ -311,18 +483,19 @@ class ContextOptimizer:
         stats: Dict[str, Any]
     ) -> List[Dict[str, Any]]:
         """
-        Compress contexts by:
-        1. Removing redundant phrases
-        2. Consolidating similar information
-        3. Extracting key information relevant to query
+        Context-aware compression:
+        1. Extract query-relevant sentences
+        2. Keep adjacent sentences for context
+        3. Preserve section headers/structure
+        4. Remove redundant phrases
         """
         compressed_contexts = []
         
         for ctx in contexts:
             content = self._get_content(ctx)
             
-            # Extract key sentences related to query
-            compressed_content = self._extract_relevant_sentences(content, query)
+            # Extract key sentences WITH surrounding context
+            compressed_content = self._extract_relevant_with_context(content, query)
             
             # Remove redundant whitespace and formatting
             compressed_content = self._clean_text(compressed_content)
@@ -339,6 +512,43 @@ class ContextOptimizer:
                 
         return compressed_contexts
     
+    def _calculate_adaptive_threshold(
+        self,
+        scores: List[float],
+        base_threshold: float
+    ) -> float:
+        """
+        Calculate adaptive threshold based on score distribution
+        
+        Strategy:
+        - High score variance → Lower threshold (diverse quality)
+        - Low score variance → Higher threshold (consistent quality)
+        - Uses median + percentile analysis for robustness
+        """
+        if len(scores) < 3:
+            return base_threshold
+        
+        scores_sorted = sorted(scores, reverse=True)
+        median = scores_sorted[len(scores) // 2]
+        q75 = scores_sorted[len(scores) // 4]
+        q25 = scores_sorted[3 * len(scores) // 4] if len(scores) >= 4 else scores_sorted[-1]
+        
+        # Calculate interquartile range (IQR)
+        iqr = q75 - q25
+        
+        # Adaptive threshold based on distribution
+        if iqr > 0.3:  # High variance
+            adaptive_threshold = max(base_threshold - 0.1, median * 0.8)
+        elif iqr < 0.15:  # Low variance
+            adaptive_threshold = min(base_threshold + 0.05, median * 0.95)
+        else:  # Medium variance
+            adaptive_threshold = (base_threshold + median) / 2
+        
+        # Clamp to reasonable range
+        adaptive_threshold = max(0.5, min(0.8, adaptive_threshold))
+        
+        return adaptive_threshold
+    
     def _rerank_with_verification(
         self,
         contexts: List[Dict[str, Any]],
@@ -346,25 +556,22 @@ class ContextOptimizer:
         stats: Dict[str, Any]
     ) -> List[Dict[str, Any]]:
         """
-        Re-rank contexts and iterate if scores are below threshold
+        Re-rank contexts with adaptive threshold adjustment
         
-        Uses iterative refinement to ensure only high-quality, relevant contexts remain:
-        - Threshold: 0.65 (65% relevance) - balances precision/recall
-        - Max iterations: 3 - optimal convergence point for most queries
-        - Each iteration: re-scores, filters, and verifies remaining contexts
+        Adaptive strategy:
+        - Analyzes score distribution each iteration
+        - Adjusts threshold based on data quality
+        - Prevents over-filtering or under-filtering
         """
         iteration = 0
         current_contexts = contexts.copy()
-        
-        print(f"\n   🔄 Re-ranking with iterative verification (threshold: {self.rerank_threshold:.0%})")
+        active_threshold = self.rerank_threshold
         
         while iteration < self.max_iterations:
             iteration += 1
             stats['iterations'] = iteration
             
-            print(f"   ├─ Iteration {iteration}/{self.max_iterations}: Scoring {len(current_contexts)} contexts...")
-            
-            # Re-score contexts based on relevance
+            # Score all contexts
             scored_contexts = []
             for ctx in current_contexts:
                 content = self._get_content(ctx)
@@ -376,43 +583,49 @@ class ContextOptimizer:
             # Sort by relevance
             scored_contexts.sort(key=lambda x: x.get('relevance_score', 0), reverse=True)
             
-            # Check if we need another iteration
             if not scored_contexts:
-                print(f"   ├─ No contexts remaining - stopping")
                 break
-                
-            min_score = min(ctx.get('relevance_score', 0) for ctx in scored_contexts)
-            max_score = max(ctx.get('relevance_score', 0) for ctx in scored_contexts)
-            avg_score = sum(ctx.get('relevance_score', 0) for ctx in scored_contexts) / len(scored_contexts)
             
-            print(f"   ├─ Scores: min={min_score:.2f}, max={max_score:.2f}, avg={avg_score:.2f}")
+            scores = [ctx.get('relevance_score', 0) for ctx in scored_contexts]
+            min_score = min(scores)
+            max_score = max(scores)
+            avg_score = sum(scores) / len(scores)
             
-            # If all scores are above threshold, we're done
-            if min_score >= self.rerank_threshold:
-                print(f"   └─ ✓ All contexts meet threshold {self.rerank_threshold:.2f} - converged in {iteration} iteration(s)")
+            # Calculate adaptive threshold if enabled
+            if self.enable_adaptive_threshold:
+                active_threshold = self._calculate_adaptive_threshold(scores, self.rerank_threshold)
+                stats['adaptive_threshold_used'] = active_threshold
+                print(f"\n   🔄 Iteration {iteration}: {len(scored_contexts)} contexts, adaptive threshold: {active_threshold:.3f}")
+            else:
+                print(f"\n   🔄 Iteration {iteration}: {len(scored_contexts)} contexts, static threshold: {active_threshold:.3f}")
+            
+            print(f"   ├─ Score range: [{min_score:.3f}, {max_score:.3f}], avg: {avg_score:.3f}")
+            
+            # Check convergence
+            if min_score >= active_threshold:
+                print(f"   └─ ✓ Converged - all contexts above threshold")
                 current_contexts = scored_contexts
                 break
             
-            # Count how many below threshold
-            below_threshold = sum(1 for ctx in scored_contexts if ctx.get('relevance_score', 0) < self.rerank_threshold)
-            
-            # Filter out low-scoring contexts for next iteration
-            current_contexts = [
+            # Filter contexts
+            filtered_contexts = [
                 ctx for ctx in scored_contexts 
-                if ctx.get('relevance_score', 0) >= self.rerank_threshold
+                if ctx.get('relevance_score', 0) >= active_threshold
             ]
             
-            print(f"   ├─ Filtered out {below_threshold} contexts below threshold {self.rerank_threshold:.2f}")
+            removed = len(scored_contexts) - len(filtered_contexts)
+            print(f"   ├─ Filtered: {removed} contexts below threshold")
             
-            # If we removed too many, keep at least top 3
-            if len(current_contexts) < 3 and len(scored_contexts) >= 3:
-                print(f"   ├─ Keeping top 3 contexts to maintain minimum context")
+            # Ensure minimum contexts
+            if len(filtered_contexts) < 3 and len(scored_contexts) >= 3:
+                print(f"   ├─ Keeping top 3 to maintain minimum context")
                 current_contexts = scored_contexts[:3]
                 break
-                
-            # If this is the last iteration
+            
+            current_contexts = filtered_contexts
+            
             if iteration == self.max_iterations:
-                print(f"   └─ Max iterations ({self.max_iterations}) reached - using {len(current_contexts)} contexts")
+                print(f"   └─ Max iterations reached")
                 
         return current_contexts
     
@@ -525,31 +738,63 @@ class ContextOptimizer:
         
         return normalized_entropy
     
-    def _extract_relevant_sentences(self, content: str, query: str) -> str:
-        """Extract sentences most relevant to the query"""
-        sentences = re.split(r'[.!?]+', content)
+    def _extract_relevant_with_context(self, content: str, query: str, context_window: int = 1) -> str:
+        """
+        Extract relevant sentences WITH surrounding context
+        
+        Strategy:
+        1. Find query-relevant sentences
+        2. Include N sentences before/after for context
+        3. Preserve section headers
+        4. Maintain semantic coherence
+        """
+        sentences = [s.strip() for s in re.split(r'[.!?]+', content) if s.strip()]
         query_words = set(re.findall(r'\w+', query.lower()))
         
-        scored_sentences = []
-        for sentence in sentences:
-            if len(sentence.strip()) < 10:
+        if not sentences:
+            return content
+        
+        # Score sentences
+        scored_indices = []
+        for i, sentence in enumerate(sentences):
+            if len(sentence) < 10:
                 continue
                 
             sentence_words = set(re.findall(r'\w+', sentence.lower()))
             overlap = len(query_words & sentence_words)
             
-            if overlap > 0:
-                scored_sentences.append((sentence.strip(), overlap))
+            # Boost score for headers (short, capitalized)
+            is_header = len(sentence.split()) <= 5 and sentence[0].isupper()
+            score = overlap + (2 if is_header else 0)
+            
+            if score > 0:
+                scored_indices.append((i, score))
         
-        if not scored_sentences:
-            # Return first few sentences if no overlap
-            return '. '.join(s.strip() for s in sentences[:3] if s.strip())
+        if not scored_indices:
+            # Return first few sentences if no matches
+            return '. '.join(sentences[:min(3, len(sentences))])
         
-        # Sort by relevance and take top sentences
-        scored_sentences.sort(key=lambda x: x[1], reverse=True)
-        top_sentences = [s for s, _ in scored_sentences[:5]]
+        # Get top relevant sentence indices
+        scored_indices.sort(key=lambda x: x[1], reverse=True)
+        relevant_indices = set([idx for idx, _ in scored_indices[:5]])
         
-        return '. '.join(top_sentences)
+        # Expand to include context window
+        expanded_indices = set()
+        for idx in relevant_indices:
+            start = max(0, idx - context_window)
+            end = min(len(sentences), idx + context_window + 1)
+            expanded_indices.update(range(start, end))
+        
+        # Sort and extract
+        final_indices = sorted(expanded_indices)
+        result_sentences = [sentences[i] for i in final_indices]
+        
+        return '. '.join(result_sentences)
+    
+    def _extract_relevant_sentences(self, content: str, query: str) -> str:
+        """Extract sentences most relevant to the query (legacy method)"""
+        # Use context-aware version with window=0 for backward compatibility
+        return self._extract_relevant_with_context(content, query, context_window=0)
     
     def _clean_text(self, text: str) -> str:
         """Remove redundant whitespace and clean formatting"""

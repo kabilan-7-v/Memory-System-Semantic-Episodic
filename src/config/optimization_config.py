@@ -5,10 +5,25 @@ Centralized settings for memory and token optimization
 
 # ==================== Deduplication Settings ====================
 
-# Similarity threshold for removing duplicate/similar content (0-1)
-# Higher = more strict (only removes very similar content)
-# Lower = more aggressive (removes somewhat similar content)
-SIMILARITY_THRESHOLD = 0.85
+# Similarity threshold for removing duplicate/similar content (0.7-0.85)
+# RECOMMENDED RANGE: 0.7-0.85
+# - 0.70-0.75: Aggressive deduplication (may lose nuanced variants)
+# - 0.76-0.82: Balanced (recommended range)
+# - 0.83-0.85: Conservative (keeps more variations)
+SIMILARITY_THRESHOLD = 0.80
+
+# ==================== Diversity Sampling ====================
+
+# Maximum contexts from same source (prevents over-representation)
+MAX_PER_SOURCE = 3
+
+# ==================== Contradiction Detection ====================
+
+# Enable contradiction detection
+ENABLE_CONTRADICTION_DETECTION = True
+
+# Contradiction threshold (how similar but opposite)
+CONTRADICTION_THRESHOLD = 0.25
 
 # ==================== Entropy Filtering Settings ====================
 
@@ -31,8 +46,12 @@ MAX_TOKENS_PER_ITEM = 1000
 
 # ==================== Re-ranking Settings ====================
 
-# Minimum relevance score for re-ranking threshold (0-1)
-# Contexts below this score trigger another iteration
+# Enable adaptive threshold (recommended)
+# Dynamically adjusts threshold based on score distribution
+ENABLE_ADAPTIVE_THRESHOLD = True
+
+# Base minimum relevance score for re-ranking threshold (0-1)
+# This serves as the baseline - will be adjusted if adaptive enabled
 # 
 # THRESHOLD RATIONALE (0.65 = 65% relevance):
 # - Below 0.60: Too permissive, allows weak/noisy matches
@@ -59,6 +78,12 @@ ENABLE_COMPRESSION = True
 # Compression aggressiveness (0-1)
 # Higher = more aggressive compression
 COMPRESSION_RATIO = 0.3
+
+# Context window for compression (sentences to keep around relevant content)
+# 0 = only relevant sentences
+# 1 = relevant + 1 sentence before/after
+# 2 = relevant + 2 sentences before/after
+COMPRESSION_CONTEXT_WINDOW = 1
 
 # ==================== Summarization Settings ====================
 
@@ -185,40 +210,56 @@ def get_optimization_profile(profile: str = "balanced") -> dict:
     """
     profiles = {
         "conservative": {
-            "similarity_threshold": 0.95,  # Only remove near-exact duplicates
+            "similarity_threshold": 0.85,  # Conservative dedup (within 0.7-0.85 range)
             "entropy_threshold": 0.2,      # Keep most content
             "min_info_content": 5,
             "max_context_tokens": 6000,
             "rerank_threshold": 0.5,
             "max_iterations": 1,
             "compression_ratio": 0.5,      # Light compression
+            "max_per_source": 5,
+            "enable_contradiction_detection": True,
+            "enable_adaptive_threshold": False,  # Static threshold
+            "contradiction_threshold": 0.25,
         },
         "balanced": {
-            "similarity_threshold": 0.85,
+            "similarity_threshold": 0.80,  # Balanced dedup (optimal in 0.7-0.85 range)
             "entropy_threshold": 0.3,
             "min_info_content": 10,
             "max_context_tokens": 4000,
-            "rerank_threshold": 0.65,      # Updated to optimal threshold
-            "max_iterations": 3,            # Updated to optimal iterations
+            "rerank_threshold": 0.65,
+            "max_iterations": 3,
             "compression_ratio": 0.3,
+            "max_per_source": 3,
+            "enable_contradiction_detection": True,
+            "enable_adaptive_threshold": True,  # Adaptive threshold
+            "contradiction_threshold": 0.25,
         },
         "aggressive": {
-            "similarity_threshold": 0.75,  # Remove even somewhat similar content
-            "entropy_threshold": 0.5,      # Strict entropy filter
-            "min_info_content": 20,
-            "max_context_tokens": 2000,
-            "rerank_threshold": 0.7,
-            "max_iterations": 3,
-            "compression_ratio": 0.2,      # Heavy compression
+            "similarity_threshold": 0.70,  # Aggressive dedup (lower bound of 0.7-0.85)
+            "entropy_threshold": 0.4,      # Stricter entropy
+            "min_info_content": 15,
+            "max_context_tokens": 3000,
+            "rerank_threshold": 0.70,      # Higher threshold
+            "max_iterations": 2,
+            "compression_ratio": 0.2,      # More compression
+            "max_per_source": 2,
+            "enable_contradiction_detection": True,
+            "enable_adaptive_threshold": True,
+            "contradiction_threshold": 0.20,
         },
         "quality": {
-            "similarity_threshold": 0.90,
+            "similarity_threshold": 0.82,  # High quality dedup
             "entropy_threshold": 0.25,
             "min_info_content": 8,
             "max_context_tokens": 5000,
-            "rerank_threshold": 0.7,       # High quality threshold
-            "max_iterations": 3,           # More iterations for quality
-            "compression_ratio": 0.4,
+            "rerank_threshold": 0.60,      # Lower threshold = more content
+            "max_iterations": 4,           # More iterations for quality
+            "compression_ratio": 0.4,      # Less compression
+            "max_per_source": 4,
+            "enable_contradiction_detection": True,
+            "enable_adaptive_threshold": True,
+            "contradiction_threshold": 0.30,
         }
     }
     
